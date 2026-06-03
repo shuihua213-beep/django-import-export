@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from import_export import exceptions, fields, resources, widgets
-from import_export.instance_loaders import ModelInstanceLoader
+from import_export.instance_loaders import CachedInstanceLoader, ModelInstanceLoader
 
 
 class BulkTest(TestCase):
@@ -98,6 +98,52 @@ class BulkCreateTest(BulkTest):
         self.assertEqual(1, mock_bulk_create.call_count)
         self.assertEqual(10, result.total_rows)
         self.assertEqual(10, result.totals["new"])
+
+    def test_bulk_create_duplicate_rows_are_converted_to_update(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                batch_size = 1
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+                instance_loader_class = CachedInstanceLoader
+
+        dataset = tablib.Dataset(
+            (1, "first"),
+            (1, "second"),
+            headers=["id", "name"],
+        )
+
+        result = _BookResource().import_data(dataset, raise_errors=True)
+
+        self.assertEqual(1, Book.objects.count())
+        self.assertEqual("second", Book.objects.get(id=1).name)
+        self.assertEqual(1, result.totals["new"])
+        self.assertEqual(1, result.totals["update"])
+
+    def test_bulk_create_duplicate_rows_do_not_persist_in_dry_run(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                batch_size = 1
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+                instance_loader_class = CachedInstanceLoader
+
+        dataset = tablib.Dataset(
+            (1, "first"),
+            (1, "second"),
+            headers=["id", "name"],
+        )
+
+        result = _BookResource().import_data(dataset, dry_run=True, raise_errors=True)
+
+        self.assertEqual(0, Book.objects.count())
+        self.assertFalse(result.has_errors())
+        self.assertEqual(1, result.totals["new"])
+        self.assertEqual(1, result.totals["update"])
 
     @mock.patch("core.models.Book.objects.bulk_create")
     def test_bulk_create_not_called_when_not_using_transactions(self, mock_bulk_create):

@@ -95,6 +95,8 @@ class Resource(metaclass=DeclarativeMetaclass):
         self.create_instances = []
         self.update_instances = []
         self.delete_instances = []
+        self.bulk_instances = {}
+        self.bulk_create_keys = set()
 
     @classmethod
     def get_result_class(self):
@@ -174,11 +176,26 @@ class Resource(metaclass=DeclarativeMetaclass):
                 return
         return instance_loader.get_instance(row)
 
+    def get_import_id_values(self, row):
+        import_id_values = []
+        for field_name in self.get_import_id_fields():
+            field = self.fields[field_name]
+            if field.column_name not in row:
+                return None
+            import_id_values.append((field.attribute, field.clean(row)))
+        return tuple(import_id_values)
+
     def get_or_init_instance(self, instance_loader, row):
         """
         Either fetches an already existing instance or initializes a new one.
         """
         if not self._meta.force_init_instance:
+            if self._meta.use_bulk:
+                import_id_values = self.get_import_id_values(row)
+                if import_id_values is not None:
+                    instance = self.bulk_instances.get(import_id_values)
+                    if instance:
+                        return instance, False
             instance = self.get_instance(instance_loader, row)
             if instance:
                 return instance, False
@@ -217,6 +234,7 @@ class Resource(metaclass=DeclarativeMetaclass):
                 self.handle_import_error(result, e, raise_errors)
             finally:
                 self.create_instances.clear()
+                self.bulk_create_keys.clear()
 
     def bulk_update(
         self, using_transactions, dry_run, raise_errors, batch_size=None, result=None
@@ -298,9 +316,15 @@ class Resource(metaclass=DeclarativeMetaclass):
         """
         self.before_save_instance(instance, row, **kwargs)
         if self._meta.use_bulk:
+            import_id_values = self.get_import_id_values(row)
+            if import_id_values is not None:
+                self.bulk_instances[import_id_values] = instance
             if is_create:
-                self.create_instances.append(instance)
-            else:
+                if import_id_values not in self.bulk_create_keys:
+                    self.create_instances.append(instance)
+                    if import_id_values is not None:
+                        self.bulk_create_keys.add(import_id_values)
+            elif import_id_values not in self.bulk_create_keys:
                 self.update_instances.append(instance)
         elif not self._is_using_transactions(kwargs) and self._is_dry_run(kwargs):
             # we don't have transactions and we want to do a dry_run
@@ -840,6 +864,8 @@ class Resource(metaclass=DeclarativeMetaclass):
         collect_failed_rows,
         **kwargs,
     ):
+        self.bulk_instances.clear()
+        self.bulk_create_keys.clear()
         result = self.get_result_class()()
         result.diff_headers = self.get_diff_headers()
         result.total_rows = len(dataset)
