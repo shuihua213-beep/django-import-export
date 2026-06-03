@@ -96,6 +96,8 @@ class Resource(metaclass=DeclarativeMetaclass):
         self.update_instances = []
         self.delete_instances = []
 
+        self.imported_instances = {}
+
     @classmethod
     def get_result_class(self):
         """
@@ -182,11 +184,29 @@ class Resource(metaclass=DeclarativeMetaclass):
             instance = self.get_instance(instance_loader, row)
             if instance:
                 return instance, False
-        return self.init_instance(row), True
+        import_id_key = self._get_import_id_key(row)
+        if import_id_key is not None and import_id_key in self.imported_instances:
+            return self.imported_instances[import_id_key], False
+        new_instance = self.init_instance(row)
+        if import_id_key is not None:
+            self.imported_instances[import_id_key] = new_instance
+        return new_instance, True
 
     def get_import_id_fields(self):
         """ """
         return self._meta.import_id_fields
+
+    def _get_import_id_key(self, row):
+        import_id_fields = self.get_import_id_fields()
+        if not import_id_fields:
+            return None
+        key_values = []
+        for field_name in import_id_fields:
+            field = self.fields[field_name]
+            if field.column_name not in row:
+                return None
+            key_values.append(field.clean(row))
+        return tuple(key_values)
 
     def get_bulk_update_fields(self):
         """
@@ -299,9 +319,15 @@ class Resource(metaclass=DeclarativeMetaclass):
         self.before_save_instance(instance, row, **kwargs)
         if self._meta.use_bulk:
             if is_create:
-                self.create_instances.append(instance)
+                if instance in self.update_instances:
+                    self.update_instances.remove(instance)
+                if instance not in self.create_instances:
+                    self.create_instances.append(instance)
             else:
-                self.update_instances.append(instance)
+                if instance in self.create_instances:
+                    self.create_instances.remove(instance)
+                if instance not in self.update_instances:
+                    self.update_instances.append(instance)
         elif not self._is_using_transactions(kwargs) and self._is_dry_run(kwargs):
             # we don't have transactions and we want to do a dry_run
             pass
@@ -844,6 +870,7 @@ class Resource(metaclass=DeclarativeMetaclass):
         result.diff_headers = self.get_diff_headers()
         result.total_rows = len(dataset)
         db_connection = self.get_db_connection_name()
+        self.imported_instances = {}
 
         try:
             with atomic_if_using_transaction(using_transactions, using=db_connection):
