@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 class Format:
+    CONTENT_TYPE = "application/octet-stream"
+
     def get_title(self):
         return type(self)
 
@@ -50,7 +52,7 @@ class Format:
     def get_content_type(self):
         # For content types see
         # https://www.iana.org/assignments/media-types/media-types.xhtml
-        return "application/octet-stream"
+        return self.CONTENT_TYPE
 
     @classmethod
     def is_available(cls):
