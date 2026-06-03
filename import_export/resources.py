@@ -24,6 +24,7 @@ from django.utils.translation import gettext_lazy as _
 from . import exceptions, widgets
 from .declarative import DeclarativeMetaclass, ModelDeclarativeMetaclass
 from .fields import Field
+from .instance_loaders import ModelInstanceLoader
 from .results import Error, Result, RowResult
 from .utils import atomic_if_using_transaction, get_related_model
 
@@ -860,8 +861,43 @@ class Resource(metaclass=DeclarativeMetaclass):
         if collect_failed_rows:
             result.add_dataset_headers(dataset.headers)
 
-        for i, data_row in enumerate(dataset, 1):
-            row = OrderedDict(zip(dataset.headers, data_row))
+        def dataset_rows():
+            for i, data_row in enumerate(dataset, 1):
+                yield i, OrderedDict(zip(dataset.headers, data_row))
+
+        self._process_row_results(
+            result=result,
+            rows_iter=dataset_rows(),
+            instance_loader=instance_loader,
+            db_connection=db_connection,
+            dry_run=dry_run,
+            raise_errors=raise_errors,
+            using_transactions=using_transactions,
+            collect_failed_rows=collect_failed_rows,
+            **kwargs,
+        )
+
+        try:
+            with atomic_if_using_transaction(using_transactions, using=db_connection):
+                self.after_import(dataset, result, **kwargs)
+        except Exception as e:
+            self.handle_import_error(result, e, raise_errors)
+
+        return result
+
+    def _process_row_results(
+        self,
+        result,
+        rows_iter,
+        instance_loader,
+        db_connection,
+        dry_run,
+        raise_errors,
+        using_transactions,
+        collect_failed_rows,
+        **kwargs,
+    ):
+        for i, row in rows_iter:
             with atomic_if_using_transaction(
                 using_transactions and not self._meta.use_bulk, using=db_connection
             ):
@@ -948,13 +984,205 @@ class Resource(metaclass=DeclarativeMetaclass):
                     using_transactions, dry_run, raise_errors, result=result
                 )
 
+    def import_file(
+        self,
+        file_path,
+        fmt=None,
+        dry_run=False,
+        raise_errors=False,
+        use_transactions=None,
+        collect_failed_rows=False,
+        rollback_on_validation_errors=False,
+        **kwargs,
+    ):
+        r"""
+        Import data directly from a file using streaming to avoid loading
+        the entire file into memory.
+
+        Unlike :meth:`import_data` which requires a ``tablib.Dataset`` fully
+        loaded in memory, this method reads rows lazily from the file,
+        processing them one at a time. This makes it suitable for very large
+        files where loading the entire dataset would cause OOM errors.
+
+        When using this method:
+        - ``CachedInstanceLoader`` is not used; ``ModelInstanceLoader`` is
+          used instead (one DB query per row for existing instance lookup).
+        - ``before_import()`` and ``after_import()`` receive an empty
+          ``tablib.Dataset`` with only headers set.
+        - ``total_rows`` is computed incrementally during processing.
+
+        :param file_path: Path to the import file on disk.
+        :param fmt: File format string (e.g. ``'csv'``, ``'tsv'``,
+            ``'xlsx'``). If ``None``, the format is auto-detected from the
+            file extension.
+        :param dry_run: If ``True``, no changes are persisted.
+        :param raise_errors: If ``True``, raise ``ImportError`` on row errors.
+        :param use_transactions: Override transaction usage.
+        :param collect_failed_rows: Collect failed rows in result.
+        :param rollback_on_validation_errors: Rollback on validation errors.
+        :param \**kwargs:
+            Additional keyword arguments passed through to inner import
+            methods.
+        """
+        if use_transactions is None:
+            use_transactions = self.get_use_transactions()
+
+        db_connection = self.get_db_connection_name()
+        connection = connections[db_connection]
+        supports_transactions = getattr(
+            connection.features, "supports_transactions", False
+        )
+
+        if use_transactions and not supports_transactions:
+            raise ImproperlyConfigured
+
+        using_transactions = (use_transactions or dry_run) and supports_transactions
+
+        if self._meta.batch_size is not None and (
+            not isinstance(self._meta.batch_size, int) or self._meta.batch_size < 1
+        ):
+            raise ValueError("Batch size must be a positive integer")
+
+        with atomic_if_using_transaction(using_transactions, using=db_connection):
+            result = self._import_file_inner(
+                file_path,
+                fmt,
+                dry_run,
+                raise_errors,
+                using_transactions,
+                collect_failed_rows,
+                **kwargs,
+            )
+            if using_transactions and (
+                dry_run
+                or result.has_errors()
+                or (rollback_on_validation_errors and result.has_validation_errors())
+            ):
+                set_rollback(True, using=db_connection)
+            return result
+
+    def _import_file_inner(
+        self,
+        file_path,
+        fmt,
+        dry_run,
+        raise_errors,
+        using_transactions,
+        collect_failed_rows,
+        **kwargs,
+    ):
+        result = self.get_result_class()()
+        result.diff_headers = self.get_diff_headers()
+        result.total_rows = 0
+        db_connection = self.get_db_connection_name()
+
+        headers, lazy_rows = self._generate_rows_from_file(file_path, fmt)
+
         try:
             with atomic_if_using_transaction(using_transactions, using=db_connection):
-                self.after_import(dataset, result, **kwargs)
+                empty_dataset = tablib.Dataset()
+                empty_dataset.headers = headers
+                self.before_import(empty_dataset, **kwargs)
+                headers = empty_dataset.headers
+            self._check_import_id_fields(headers)
+        except Exception as e:
+            self.handle_import_error(result, e, raise_errors)
+
+        instance_loader = ModelInstanceLoader(self)
+
+        if collect_failed_rows:
+            result.add_dataset_headers(headers)
+
+        def streaming_rows():
+            for i, data_row in enumerate(lazy_rows, 1):
+                yield i, OrderedDict(zip(headers, data_row))
+
+        self._process_row_results(
+            result=result,
+            rows_iter=streaming_rows(),
+            instance_loader=instance_loader,
+            db_connection=db_connection,
+            dry_run=dry_run,
+            raise_errors=raise_errors,
+            using_transactions=using_transactions,
+            collect_failed_rows=collect_failed_rows,
+            **kwargs,
+        )
+
+        result.total_rows = sum(result.totals.values())
+
+        try:
+            with atomic_if_using_transaction(using_transactions, using=db_connection):
+                empty_dataset = tablib.Dataset()
+                empty_dataset.headers = headers
+                self.after_import(empty_dataset, result, **kwargs)
         except Exception as e:
             self.handle_import_error(result, e, raise_errors)
 
         return result
+
+    @classmethod
+    def _generate_rows_from_file(cls, file_path, fmt):
+        import csv
+        import os
+
+        if fmt is None:
+            ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+            fmt = ext
+
+        if fmt.lower() in ("csv", "tsv"):
+            delimiter = "\t" if fmt.lower() == "tsv" else ","
+            file_handle = open(file_path, "r", newline="", encoding="utf-8")
+            reader = csv.reader(file_handle, delimiter=delimiter)
+            try:
+                headers = next(reader)
+            except StopIteration:
+                file_handle.close()
+                raise ValueError("Empty file")
+
+            def row_generator():
+                try:
+                    for row in reader:
+                        yield row
+                finally:
+                    file_handle.close()
+
+            return list(headers), row_generator()
+
+        elif fmt.lower() == "xlsx":
+            from io import BytesIO
+
+            import openpyxl
+
+            with open(file_path, "rb") as f:
+                data = f.read()
+
+            wb = openpyxl.load_workbook(
+                BytesIO(data), read_only=True, data_only=True
+            )
+            sheet = wb.active
+            rows = sheet.rows
+            headers = [cell.value for cell in next(rows)]
+
+            def row_generator():
+                try:
+                    for row in rows:
+                        yield [cell.value for cell in row]
+                finally:
+                    wb.close()
+
+            return headers, row_generator()
+
+        else:
+            with open(file_path, "rb") as f:
+                data = f.read()
+            dataset = tablib.Dataset().load(data, format=fmt)
+
+            def row_generator():
+                for row in dataset:
+                    yield row
+
+            return list(dataset.headers), row_generator()
 
     def get_import_order(self):
         return self._get_ordered_field_names("import_order")
