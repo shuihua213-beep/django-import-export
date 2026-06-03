@@ -41,6 +41,22 @@ def has_natural_foreign_key(model):
     )
 
 
+class StreamingDataset:
+    def __init__(self, headers, rows, total_rows=None):
+        self.headers = [] if headers is None else list(headers)
+        self._rows = rows
+        self.total_rows = total_rows
+
+    def __iter__(self):
+        rows = self._rows() if callable(self._rows) else self._rows
+        return iter(rows)
+
+    def __len__(self):
+        if self.total_rows is None:
+            raise TypeError
+        return self.total_rows
+
+
 class Diff:
     def __init__(self, resource, instance, new):
         self.left = Diff._read_field_values(resource, instance)
@@ -579,6 +595,29 @@ class Resource(metaclass=DeclarativeMetaclass):
         """
         return [force_str(field.column_name) for field in self.get_import_fields()]
 
+    def get_dataset_headers(self, dataset):
+        return getattr(dataset, "headers", None)
+
+    def get_dataset_length(self, dataset):
+        try:
+            return len(dataset)
+        except TypeError:
+            return None
+
+    def iter_dataset_rows(self, dataset):
+        headers = self.get_dataset_headers(dataset)
+        for i, data_row in enumerate(dataset, 1):
+            if isinstance(data_row, OrderedDict):
+                row = data_row
+            elif isinstance(data_row, dict):
+                if headers:
+                    row = OrderedDict((header, data_row.get(header)) for header in headers)
+                else:
+                    row = OrderedDict(data_row.items())
+            else:
+                row = OrderedDict(zip(headers, data_row))
+            yield i, row
+
     def before_import(self, dataset, **kwargs):
         r"""
         Override to add additional logic. Does nothing by default.
@@ -842,26 +881,30 @@ class Resource(metaclass=DeclarativeMetaclass):
     ):
         result = self.get_result_class()()
         result.diff_headers = self.get_diff_headers()
-        result.total_rows = len(dataset)
+        dataset_length = self.get_dataset_length(dataset)
+        if dataset_length is not None:
+            result.total_rows = dataset_length
         db_connection = self.get_db_connection_name()
 
         try:
             with atomic_if_using_transaction(using_transactions, using=db_connection):
                 self.before_import(dataset, **kwargs)
-            self._check_import_id_fields(dataset.headers)
+            self._check_import_id_fields(self.get_dataset_headers(dataset))
         except Exception as e:
             self.handle_import_error(result, e, raise_errors)
 
         instance_loader = self._meta.instance_loader_class(self, dataset)
 
-        # Update the total in case the dataset was altered by before_import()
-        result.total_rows = len(dataset)
+        dataset_length = self.get_dataset_length(dataset)
+        if dataset_length is not None:
+            result.total_rows = dataset_length
 
         if collect_failed_rows:
-            result.add_dataset_headers(dataset.headers)
+            result.add_dataset_headers(self.get_dataset_headers(dataset))
 
-        for i, data_row in enumerate(dataset, 1):
-            row = OrderedDict(zip(dataset.headers, data_row))
+        processed_rows = 0
+        for i, row in self.iter_dataset_rows(dataset):
+            processed_rows = i
             with atomic_if_using_transaction(
                 using_transactions and not self._meta.use_bulk, using=db_connection
             ):
@@ -934,6 +977,9 @@ class Resource(metaclass=DeclarativeMetaclass):
                 or self._meta.report_skipped
             ):
                 result.append_row_result(row_result)
+
+        if dataset_length is None:
+            result.total_rows = processed_rows
 
         if self._meta.use_bulk:
             # bulk persist any instances which are still pending

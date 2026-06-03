@@ -1,0 +1,204 @@
+diff --git a/import_export/instance_loaders.py b/import_export/instance_loaders.py
+index 68e0480..1cf2e86 100644
+--- a/import_export/instance_loaders.py
++++ b/import_export/instance_loaders.py
+@@ -50,18 +50,25 @@ class CachedInstanceLoader(ModelInstanceLoader):
+         pk_field_name = self.resource.get_import_id_fields()[0]
+         self.pk_field = self.resource.fields[pk_field_name]
+ 
+-        # If the pk field is missing, all instances in dataset are new
+-        # and cache is empty.
+-        self.all_instances = {}
+-        if self.dataset.dict and self.pk_field.column_name in self.dataset.dict[0]:
+-            ids = [self.pk_field.clean(row) for row in self.dataset.dict]
+-            qs = self.get_queryset().filter(**{"%s__in" % self.pk_field.attribute: ids})
++        dataset_dict = getattr(self.dataset, "dict", None)
++        self.all_instances = None
++        if not dataset_dict:
++            return
+ 
+-            self.all_instances = {
+-                self.pk_field.get_value(instance): instance for instance in qs
+-            }
++        if self.pk_field.column_name not in dataset_dict[0]:
++            self.all_instances = {}
++            return
++
++        ids = [self.pk_field.clean(row) for row in dataset_dict]
++        qs = self.get_queryset().filter(**{"%s__in" % self.pk_field.attribute: ids})
++
++        self.all_instances = {
++            self.pk_field.get_value(instance): instance for instance in qs
++        }
+ 
+     def get_instance(self, row):
++        if self.all_instances is None:
++            return super().get_instance(row)
+         if self.all_instances:
+             return self.all_instances.get(self.pk_field.clean(row))
+         return None
+diff --git a/import_export/resources.py b/import_export/resources.py
+index 9015759..4fec426 100644
+--- a/import_export/resources.py
++++ b/import_export/resources.py
+@@ -41,6 +41,22 @@ def has_natural_foreign_key(model):
+     )
+ 
+ 
++class StreamingDataset:
++    def __init__(self, headers, rows, total_rows=None):
++        self.headers = [] if headers is None else list(headers)
++        self._rows = rows
++        self.total_rows = total_rows
++
++    def __iter__(self):
++        rows = self._rows() if callable(self._rows) else self._rows
++        return iter(rows)
++
++    def __len__(self):
++        if self.total_rows is None:
++            raise TypeError
++        return self.total_rows
++
++
+ class Diff:
+     def __init__(self, resource, instance, new):
+         self.left = Diff._read_field_values(resource, instance)
+@@ -579,6 +595,29 @@ class Resource(metaclass=DeclarativeMetaclass):
+         """
+         return [force_str(field.column_name) for field in self.get_import_fields()]
+ 
++    def get_dataset_headers(self, dataset):
++        return getattr(dataset, "headers", None)
++
++    def get_dataset_length(self, dataset):
++        try:
++            return len(dataset)
++        except TypeError:
++            return None
++
++    def iter_dataset_rows(self, dataset):
++        headers = self.get_dataset_headers(dataset)
++        for i, data_row in enumerate(dataset, 1):
++            if isinstance(data_row, OrderedDict):
++                row = data_row
++            elif isinstance(data_row, dict):
++                if headers:
++                    row = OrderedDict((header, data_row.get(header)) for header in headers)
++                else:
++                    row = OrderedDict(data_row.items())
++            else:
++                row = OrderedDict(zip(headers, data_row))
++            yield i, row
++
+     def before_import(self, dataset, **kwargs):
+         r"""
+         Override to add additional logic. Does nothing by default.
+@@ -842,26 +881,30 @@ class Resource(metaclass=DeclarativeMetaclass):
+     ):
+         result = self.get_result_class()()
+         result.diff_headers = self.get_diff_headers()
+-        result.total_rows = len(dataset)
++        dataset_length = self.get_dataset_length(dataset)
++        if dataset_length is not None:
++            result.total_rows = dataset_length
+         db_connection = self.get_db_connection_name()
+ 
+         try:
+             with atomic_if_using_transaction(using_transactions, using=db_connection):
+                 self.before_import(dataset, **kwargs)
+-            self._check_import_id_fields(dataset.headers)
++            self._check_import_id_fields(self.get_dataset_headers(dataset))
+         except Exception as e:
+             self.handle_import_error(result, e, raise_errors)
+ 
+         instance_loader = self._meta.instance_loader_class(self, dataset)
+ 
+-        # Update the total in case the dataset was altered by before_import()
+-        result.total_rows = len(dataset)
++        dataset_length = self.get_dataset_length(dataset)
++        if dataset_length is not None:
++            result.total_rows = dataset_length
+ 
+         if collect_failed_rows:
+-            result.add_dataset_headers(dataset.headers)
++            result.add_dataset_headers(self.get_dataset_headers(dataset))
+ 
+-        for i, data_row in enumerate(dataset, 1):
+-            row = OrderedDict(zip(dataset.headers, data_row))
++        processed_rows = 0
++        for i, row in self.iter_dataset_rows(dataset):
++            processed_rows = i
+             with atomic_if_using_transaction(
+                 using_transactions and not self._meta.use_bulk, using=db_connection
+             ):
+@@ -935,6 +978,9 @@ class Resource(metaclass=DeclarativeMetaclass):
+             ):
+                 result.append_row_result(row_result)
+ 
++        if dataset_length is None:
++            result.total_rows = processed_rows
++
+         if self._meta.use_bulk:
+             # bulk persist any instances which are still pending
+             with atomic_if_using_transaction(using_transactions, using=db_connection):
+diff --git a/tests/core/tests/test_resources/test_bulk_operations.py b/tests/core/tests/test_resources/test_bulk_operations.py
+index 86e2743..c35686d 100644
+--- a/tests/core/tests/test_resources/test_bulk_operations.py
++++ b/tests/core/tests/test_resources/test_bulk_operations.py
+@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError
+ from django.test import TestCase
+ 
+ from import_export import exceptions, fields, resources, widgets
+-from import_export.instance_loaders import ModelInstanceLoader
++from import_export.instance_loaders import CachedInstanceLoader, ModelInstanceLoader
+ 
+ 
+ class BulkTest(TestCase):
+@@ -130,6 +130,18 @@ class BulkCreateTest(BulkTest):
+         resource.import_data(self.dataset, dry_run=True)
+         mock_bulk_create.assert_not_called()
+ 
++    def test_bulk_create_streaming_dataset(self):
++        dataset = resources.StreamingDataset(
++            headers=["id", "name"],
++            rows=((i + 1, "book_name") for i in range(10)),
++        )
++
++        result = self.resource.import_data(dataset)
++
++        self.assertEqual(10, Book.objects.count())
++        self.assertEqual(10, result.total_rows)
++        self.assertEqual(10, result.totals["new"])
++
+     @mock.patch("core.models.Book.objects.bulk_create")
+     def test_bulk_create_batch_size_of_4(self, mock_bulk_create):
+         class _BookResource(resources.ModelResource):
+@@ -424,6 +436,27 @@ class BulkUpdateTest(BulkTest):
+         self.resource.import_data(self.dataset, dry_run=True)
+         self.assertEqual(1, mock_bulk_update.call_count)
+ 
++    def test_bulk_update_streaming_dataset_with_cached_instance_loader(self):
++        class _BookResource(resources.ModelResource):
++            class Meta:
++                model = Book
++                use_bulk = True
++                fields = ("id", "name")
++                import_id_fields = ("id",)
++                instance_loader_class = CachedInstanceLoader
++
++        resource = _BookResource()
++        dataset = resources.StreamingDataset(
++            headers=["id", "name"],
++            rows=((book.id, "UPDATED") for book in Book.objects.order_by("id")),
++        )
++
++        result = resource.import_data(dataset)
++
++        self.assertEqual(10, result.total_rows)
++        self.assertEqual(10, result.totals["update"])
++        self.assertEqual(10, Book.objects.filter(name="UPDATED").count())
++
+     @mock.patch("core.models.Book.objects.bulk_update")
+     def test_bulk_not_called_when_use_bulk_disabled(self, mock_bulk_update):
+         class _BookResource(resources.ModelResource):

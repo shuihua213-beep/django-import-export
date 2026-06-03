@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from import_export import exceptions, fields, resources, widgets
-from import_export.instance_loaders import ModelInstanceLoader
+from import_export.instance_loaders import CachedInstanceLoader, ModelInstanceLoader
 
 
 class BulkTest(TestCase):
@@ -129,6 +129,18 @@ class BulkCreateTest(BulkTest):
         resource = _BookResource()
         resource.import_data(self.dataset, dry_run=True)
         mock_bulk_create.assert_not_called()
+
+    def test_bulk_create_streaming_dataset(self):
+        dataset = resources.StreamingDataset(
+            headers=["id", "name"],
+            rows=((i + 1, "book_name") for i in range(10)),
+        )
+
+        result = self.resource.import_data(dataset)
+
+        self.assertEqual(10, Book.objects.count())
+        self.assertEqual(10, result.total_rows)
+        self.assertEqual(10, result.totals["new"])
 
     @mock.patch("core.models.Book.objects.bulk_create")
     def test_bulk_create_batch_size_of_4(self, mock_bulk_create):
@@ -423,6 +435,27 @@ class BulkUpdateTest(BulkTest):
     def test_bulk_update_called_for_dry_run(self, mock_bulk_update):
         self.resource.import_data(self.dataset, dry_run=True)
         self.assertEqual(1, mock_bulk_update.call_count)
+
+    def test_bulk_update_streaming_dataset_with_cached_instance_loader(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+                instance_loader_class = CachedInstanceLoader
+
+        resource = _BookResource()
+        dataset = resources.StreamingDataset(
+            headers=["id", "name"],
+            rows=((book.id, "UPDATED") for book in Book.objects.order_by("id")),
+        )
+
+        result = resource.import_data(dataset)
+
+        self.assertEqual(10, result.total_rows)
+        self.assertEqual(10, result.totals["update"])
+        self.assertEqual(10, Book.objects.filter(name="UPDATED").count())
 
     @mock.patch("core.models.Book.objects.bulk_update")
     def test_bulk_not_called_when_use_bulk_disabled(self, mock_bulk_update):
