@@ -1,9 +1,11 @@
 import functools
+import itertools
 import logging
 import types
 from collections import OrderedDict
 from copy import deepcopy
 from html import escape
+from io import IOBase
 from warnings import warn
 
 import tablib
@@ -30,6 +32,157 @@ from .utils import atomic_if_using_transaction, get_related_model
 logger = logging.getLogger(__name__)
 # Set default logging handler to avoid "No handler found" warnings.
 logger.addHandler(logging.NullHandler())
+
+
+class StreamingDataset:
+    """
+    A lazy-loading dataset wrapper that iterates over rows from a stream
+    without loading all data into memory.
+    
+    This is designed to prevent OOM errors when importing large files.
+    It provides a minimal interface compatible with the import workflow,
+    but does NOT support random access or len().
+    
+    Usage:
+        # From a file-like object (CSV)
+        with open('large_file.csv') as f:
+            stream_ds = StreamingDataset(f, format='csv')
+            result = resource.import_stream(stream_ds)
+        
+        # From an iterator of rows
+        def row_generator():
+            for line in large_file:
+                yield parse_line(line)
+        
+        stream_ds = StreamingDataset(row_generator(), headers=['id', 'name'])
+        result = resource.import_stream(stream_ds)
+    """
+    
+    def __init__(self, stream, headers=None, format=None, **kwargs):
+        """
+        Initialize a StreamingDataset.
+        
+        :param stream: An iterable of rows, or a file-like object.
+          If a file-like object is provided, the format parameter must be specified.
+        :param headers: A list of column headers. Required if stream is an iterator.
+          If format is specified, headers will be auto-detected from the first row.
+        :param format: The format of the stream (e.g., 'csv', 'json', 'yaml').
+          If specified, tablib will be used to parse the stream lazily.
+        :param kwargs: Additional parameters passed to tablib when parsing.
+        """
+        self._stream = stream
+        self._headers = headers
+        self._format = format
+        self._kwargs = kwargs
+        self._iterator = None
+        self._exhausted = False
+        self._row_count = 0
+        
+        if isinstance(stream, IOBase):
+            if format is None:
+                raise ValueError(
+                    "format parameter is required when stream is a file-like object"
+                )
+            self._iterator = self._iterate_file_stream()
+        elif headers is None:
+            raise ValueError(
+                "headers parameter is required when stream is an iterator"
+            )
+        else:
+            self._iterator = self._iterate_row_iterator()
+    
+    @property
+    def headers(self):
+        """Return the column headers."""
+        return self._headers
+    
+    @headers.setter
+    def headers(self, value):
+        """Allow headers to be set (for compatibility with before_import hooks)."""
+        self._headers = value
+    
+    def __iter__(self):
+        """Iterate over rows in the stream."""
+        if self._exhausted:
+            raise RuntimeError(
+                "StreamingDataset can only be iterated once. "
+                "Create a new instance to re-import."
+            )
+        return self
+    
+    def __next__(self):
+        """Return the next row from the stream."""
+        if self._iterator is None:
+            raise StopIteration
+        
+        try:
+            row = next(self._iterator)
+            self._row_count += 1
+            return row
+        except StopIteration:
+            self._exhausted = True
+            raise
+    
+    def _iterate_file_stream(self):
+        """Iterate over a file stream using tablib's lazy loading."""
+        if self._format == 'csv':
+            yield from self._iterate_csv_stream()
+        else:
+            yield from self._iterate_generic_tablib_stream()
+    
+    def _iterate_csv_stream(self):
+        """Lazily iterate over a CSV file."""
+        import csv
+        
+        if hasattr(self._stream, 'readline'):
+            reader = csv.DictReader(self._stream, **self._kwargs)
+        else:
+            reader = csv.DictReader(iter(self._stream), **self._kwargs)
+        
+        if self._headers is None:
+            self._headers = reader.fieldnames
+        
+        for row in reader:
+            yield [row.get(header, '') for header in self._headers]
+    
+    def _iterate_generic_tablib_stream(self):
+        """
+        Iterate over a stream using tablib.
+        Note: This loads the entire stream into memory, use CSV format for true streaming.
+        """
+        data = self._stream.read()
+        dataset = tablib.import_set(data, format=self._format)
+        
+        if self._headers is None:
+            self._headers = dataset.headers
+        
+        for row in dataset:
+            yield list(row)
+    
+    def _iterate_row_iterator(self):
+        """Iterate over a pre-defined row iterator."""
+        yield from self._stream
+    
+    def __len__(self):
+        """
+        StreamingDataset does not support len() as the total count is unknown.
+        Raises RuntimeError to prevent accidental calls.
+        """
+        raise RuntimeError(
+            "StreamingDataset does not support len(). "
+            "Use import_stream() instead of import_data() for streaming imports."
+        )
+    
+    @property
+    def dict(self):
+        """
+        Returns a list of row dicts.
+        Not supported for streaming datasets.
+        """
+        raise RuntimeError(
+            "StreamingDataset does not support dict access. "
+            "This would require loading all data into memory."
+        )
 
 
 def has_natural_foreign_key(model):
@@ -831,6 +984,88 @@ class Resource(metaclass=DeclarativeMetaclass):
                 set_rollback(True, using=db_connection)
             return result
 
+    def import_stream(
+        self,
+        stream_dataset,
+        dry_run=False,
+        raise_errors=False,
+        use_transactions=None,
+        collect_failed_rows=False,
+        rollback_on_validation_errors=False,
+        **kwargs,
+    ):
+        r"""
+        Imports data from a ``StreamingDataset`` using lazy row iteration.
+        
+        This method is designed for large datasets that cannot fit in memory.
+        Unlike ``import_data()``, this method processes rows one at a time
+        without loading the entire dataset.
+        
+        :param stream_dataset: A ``StreamingDataset`` instance or any iterable
+          that yields rows as lists.
+        
+        :param raise_errors: Whether errors should be printed to the end user
+                             or raised regularly.
+        
+        :param use_transactions: If ``True`` the import process will be processed
+                                 inside a transaction.
+        
+        :param collect_failed_rows:
+          If ``True`` the import process will create a new dataset object comprising
+          failed rows and errors.
+          This can be useful for debugging purposes but will cause higher memory usage
+          for larger datasets.
+          See :attr:`~import_export.results.Result.failed_dataset`.
+        
+        :param rollback_on_validation_errors: If both ``use_transactions`` and
+          ``rollback_on_validation_errors`` are set to ``True``, the import process will
+          be rolled back in case of ValidationError.
+        
+        :param dry_run: If ``dry_run`` is set, or an error occurs, if a transaction
+            is being used, it will be rolled back.
+        
+        :param \**kwargs:
+            Metadata which may be associated with the import.
+        
+        :returns: A :class:`~import_export.results.Result` instance.
+        """
+        if use_transactions is None:
+            use_transactions = self.get_use_transactions()
+
+        db_connection = self.get_db_connection_name()
+        connection = connections[db_connection]
+        supports_transactions = getattr(
+            connection.features, "supports_transactions", False
+        )
+
+        if use_transactions and not supports_transactions:
+            raise ImproperlyConfigured
+
+        using_transactions = (use_transactions or dry_run) and supports_transactions
+
+        if self._meta.batch_size is not None and (
+            not isinstance(self._meta.batch_size, int) or self._meta.batch_size < 1
+        ):
+            raise ValueError("Batch size must be a positive integer")
+
+        with atomic_if_using_transaction(using_transactions, using=db_connection):
+            result = self._import_data_impl(
+                stream_dataset,
+                dry_run,
+                raise_errors,
+                using_transactions,
+                collect_failed_rows,
+                is_streaming=True,
+                **kwargs,
+            )
+            if using_transactions and (
+                dry_run
+                or result.has_errors()
+                or (rollback_on_validation_errors and result.has_validation_errors())
+            ):
+                set_rollback(True, using=db_connection)
+            return result
+
     def import_data_inner(
         self,
         dataset,
@@ -840,9 +1075,29 @@ class Resource(metaclass=DeclarativeMetaclass):
         collect_failed_rows,
         **kwargs,
     ):
+        return self._import_data_impl(
+            dataset,
+            dry_run,
+            raise_errors,
+            using_transactions,
+            collect_failed_rows,
+            is_streaming=False,
+            **kwargs,
+        )
+
+    def _import_data_impl(
+        self,
+        dataset,
+        dry_run,
+        raise_errors,
+        using_transactions,
+        collect_failed_rows,
+        is_streaming=False,
+        **kwargs,
+    ):
         result = self.get_result_class()()
         result.diff_headers = self.get_diff_headers()
-        result.total_rows = len(dataset)
+        result.total_rows = 0 if is_streaming else len(dataset)
         db_connection = self.get_db_connection_name()
 
         try:
@@ -854,13 +1109,15 @@ class Resource(metaclass=DeclarativeMetaclass):
 
         instance_loader = self._meta.instance_loader_class(self, dataset)
 
-        # Update the total in case the dataset was altered by before_import()
-        result.total_rows = len(dataset)
+        if not is_streaming:
+            result.total_rows = len(dataset)
 
         if collect_failed_rows:
             result.add_dataset_headers(dataset.headers)
 
-        for i, data_row in enumerate(dataset, 1):
+        row_iterator = enumerate(dataset, 1)
+        
+        for i, data_row in row_iterator:
             row = OrderedDict(zip(dataset.headers, data_row))
             with atomic_if_using_transaction(
                 using_transactions and not self._meta.use_bulk, using=db_connection

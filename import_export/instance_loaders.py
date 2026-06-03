@@ -42,6 +42,10 @@ class CachedInstanceLoader(ModelInstanceLoader):
 
     This instance loader work only when there is one ``import_id_fields``
     field.
+    
+    When used with a StreamingDataset, this loader falls back to
+    ModelInstanceLoader behavior since streaming datasets don't support
+    random access to all rows.
     """
 
     def __init__(self, *args, **kwargs):
@@ -53,13 +57,20 @@ class CachedInstanceLoader(ModelInstanceLoader):
         # If the pk field is missing, all instances in dataset are new
         # and cache is empty.
         self.all_instances = {}
-        if self.dataset.dict and self.pk_field.column_name in self.dataset.dict[0]:
-            ids = [self.pk_field.clean(row) for row in self.dataset.dict]
-            qs = self.get_queryset().filter(**{"%s__in" % self.pk_field.attribute: ids})
+        
+        try:
+            dataset_dict = self.dataset.dict
+            if dataset_dict and self.pk_field.column_name in dataset_dict[0]:
+                ids = [self.pk_field.clean(row) for row in dataset_dict]
+                qs = self.get_queryset().filter(**{"%s__in" % self.pk_field.attribute: ids})
 
-            self.all_instances = {
-                self.pk_field.get_value(instance): instance for instance in qs
-            }
+                self.all_instances = {
+                    self.pk_field.get_value(instance): instance for instance in qs
+                }
+        except RuntimeError:
+            # StreamingDataset doesn't support .dict access
+            # Fall back to ModelInstanceLoader behavior (query DB per row)
+            self.all_instances = {}
 
     def get_instance(self, row):
         if self.all_instances:
