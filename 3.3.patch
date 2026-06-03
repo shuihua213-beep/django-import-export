@@ -1,0 +1,59 @@
+diff --git a/import_export/command_utils.py b/import_export/command_utils.py
+index 22f6e2d..ba66455 100644
+--- a/import_export/command_utils.py
++++ b/import_export/command_utils.py
+@@ -31,7 +31,7 @@ def get_resource_class(model_or_resource_class):
+ 
+ 
+ def get_mime_type_format_mapping():
+-    return {format.CONTENT_TYPE: format for format in get_default_formats()}
++    return {format().get_content_type(): format for format in get_default_formats()}
+ 
+ 
+ def get_format_class(format_name, file_name, encoding=None):
+diff --git a/import_export/formats/base_formats.py b/import_export/formats/base_formats.py
+index efb5fc9..cb21423 100644
+--- a/import_export/formats/base_formats.py
++++ b/import_export/formats/base_formats.py
+@@ -50,6 +50,10 @@ class Format:
+     def get_content_type(self):
+         # For content types see
+         # https://www.iana.org/assignments/media-types/media-types.xhtml
++        if hasattr(self, "content_type"):
++            return self.content_type
++        if hasattr(self, "CONTENT_TYPE"):
++            return self.CONTENT_TYPE
+         return "application/octet-stream"
+ 
+     @classmethod
+@@ -101,9 +105,6 @@ class TablibFormat(Format):
+     def get_extension(self):
+         return self.get_format().extensions[0]
+ 
+-    def get_content_type(self):
+-        return self.CONTENT_TYPE
+-
+     def can_import(self):
+         return hasattr(self.get_format(), "import_set")
+ 
+diff --git a/tests/core/tests/test_base_formats.py b/tests/core/tests/test_base_formats.py
+index b47f098..e7a3b1d 100644
+--- a/tests/core/tests/test_base_formats.py
++++ b/tests/core/tests/test_base_formats.py
+@@ -53,6 +53,16 @@ class FormatTest(TestCase):
+     def test_get_content_type(self):
+         self.assertEqual("application/octet-stream", self.format.get_content_type())
+ 
++    def test_get_content_type_custom(self):
++        class CustomFormat1(base_formats.Format):
++            content_type = "application/custom1"
++
++        class CustomFormat2(base_formats.Format):
++            CONTENT_TYPE = "application/custom2"
++
++        self.assertEqual("application/custom1", CustomFormat1().get_content_type())
++        self.assertEqual("application/custom2", CustomFormat2().get_content_type())
++
+     def test_is_available_default(self):
+         self.assertTrue(self.format.is_available())
+ 

@@ -31,7 +31,7 @@ def get_resource_class(model_or_resource_class):
 
 
 def get_mime_type_format_mapping():
-    return {format.CONTENT_TYPE: format for format in get_default_formats()}
+    return {format().get_content_type(): format for format in get_default_formats()}
 
 
 def get_format_class(format_name, file_name, encoding=None):

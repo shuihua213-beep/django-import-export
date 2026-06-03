@@ -50,6 +50,10 @@ class Format:
     def get_content_type(self):
         # For content types see
         # https://www.iana.org/assignments/media-types/media-types.xhtml
+        if hasattr(self, "content_type"):
+            return self.content_type
+        if hasattr(self, "CONTENT_TYPE"):
+            return self.CONTENT_TYPE
         return "application/octet-stream"
 
     @classmethod
@@ -100,9 +104,6 @@ class TablibFormat(Format):
 
     def get_extension(self):
         return self.get_format().extensions[0]
-
-    def get_content_type(self):
-        return self.CONTENT_TYPE
 
     def can_import(self):
         return hasattr(self.get_format(), "import_set")

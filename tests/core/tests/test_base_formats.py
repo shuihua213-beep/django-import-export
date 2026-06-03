@@ -53,6 +53,16 @@ class FormatTest(TestCase):
     def test_get_content_type(self):
         self.assertEqual("application/octet-stream", self.format.get_content_type())
 
+    def test_get_content_type_custom(self):
+        class CustomFormat1(base_formats.Format):
+            content_type = "application/custom1"
+
+        class CustomFormat2(base_formats.Format):
+            CONTENT_TYPE = "application/custom2"
+
+        self.assertEqual("application/custom1", CustomFormat1().get_content_type())
+        self.assertEqual("application/custom2", CustomFormat2().get_content_type())
+
     def test_is_available_default(self):
         self.assertTrue(self.format.is_available())
 
