@@ -179,9 +179,26 @@ class Resource(metaclass=DeclarativeMetaclass):
         Either fetches an already existing instance or initializes a new one.
         """
         if not self._meta.force_init_instance:
+            import_id_fields = [
+                self.fields[f] for f in self.get_import_id_fields()
+            ]
+            has_id = True
+            import_id = []
+            for field in import_id_fields:
+                if field.column_name not in row:
+                    has_id = False
+                    break
+                import_id.append(field.clean(row))
+            
+            if has_id:
+                import_id = tuple(import_id)
+                if hasattr(self, '_in_memory_instances') and import_id in self._in_memory_instances:
+                    return self._in_memory_instances[import_id], False
+
             instance = self.get_instance(instance_loader, row)
             if instance:
                 return instance, False
+
         return self.init_instance(row), True
 
     def get_import_id_fields(self):
@@ -307,6 +324,21 @@ class Resource(metaclass=DeclarativeMetaclass):
             pass
         else:
             self.do_instance_save(instance, is_create)
+
+        if hasattr(self, '_in_memory_instances'):
+            import_id_fields = [
+                self.fields[f] for f in self.get_import_id_fields()
+            ]
+            has_id = True
+            import_id = []
+            for field in import_id_fields:
+                if field.column_name not in row:
+                    has_id = False
+                    break
+                import_id.append(field.clean(row))
+            if has_id:
+                self._in_memory_instances[tuple(import_id)] = instance
+
         self.after_save_instance(instance, row, **kwargs)
 
     def do_instance_save(self, instance, is_create):
@@ -367,6 +399,21 @@ class Resource(metaclass=DeclarativeMetaclass):
             pass
         else:
             instance.delete()
+
+        if hasattr(self, '_in_memory_instances'):
+            import_id_fields = [
+                self.fields[f] for f in self.get_import_id_fields()
+            ]
+            has_id = True
+            import_id = []
+            for field in import_id_fields:
+                if field.column_name not in row:
+                    has_id = False
+                    break
+                import_id.append(field.clean(row))
+            if has_id:
+                self._in_memory_instances.pop(tuple(import_id), None)
+
         self.after_delete_instance(instance, row, **kwargs)
 
     def before_delete_instance(self, instance, row, **kwargs):
@@ -853,6 +900,10 @@ class Resource(metaclass=DeclarativeMetaclass):
             self.handle_import_error(result, e, raise_errors)
 
         instance_loader = self._meta.instance_loader_class(self, dataset)
+
+        # Cache to store instances so that duplicate rows in the same import
+        # will update the previously created/updated instance.
+        self._in_memory_instances = {}
 
         # Update the total in case the dataset was altered by before_import()
         result.total_rows = len(dataset)
