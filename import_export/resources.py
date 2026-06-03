@@ -95,6 +95,9 @@ class Resource(metaclass=DeclarativeMetaclass):
         self.create_instances = []
         self.update_instances = []
         self.delete_instances = []
+        
+        # Cache to track instances that have been processed during import
+        self._processed_instances_cache = {}
 
     @classmethod
     def get_result_class(self):
@@ -161,6 +164,21 @@ class Resource(metaclass=DeclarativeMetaclass):
         """
         raise NotImplementedError()
 
+    def _get_import_key(self, row):
+        """
+        Generate a unique key for the row based on import_id_fields.
+        """
+        import_id_fields = [self.fields[f] for f in self.get_import_id_fields()]
+        key_parts = []
+        for field in import_id_fields:
+            if field.column_name in row:
+                try:
+                    value = field.clean(row)
+                    key_parts.append(f"{field.attribute}={value}")
+                except Exception:
+                    pass
+        return "|".join(key_parts) if key_parts else None
+
     def get_instance(self, instance_loader, row):
         """
         Calls the :doc:`InstanceLoader <api_instance_loaders>`.
@@ -179,6 +197,11 @@ class Resource(metaclass=DeclarativeMetaclass):
         Either fetches an already existing instance or initializes a new one.
         """
         if not self._meta.force_init_instance:
+            # Check cache first for already processed instances
+            import_key = self._get_import_key(row)
+            if import_key and import_key in self._processed_instances_cache:
+                return self._processed_instances_cache[import_key], False
+            # Then check instance loader
             instance = self.get_instance(instance_loader, row)
             if instance:
                 return instance, False
@@ -297,6 +320,12 @@ class Resource(metaclass=DeclarativeMetaclass):
             See :meth:`import_row
         """
         self.before_save_instance(instance, row, **kwargs)
+        
+        # Cache the instance so that duplicate rows in the same import can update it
+        import_key = self._get_import_key(row)
+        if import_key:
+            self._processed_instances_cache[import_key] = instance
+        
         if self._meta.use_bulk:
             if is_create:
                 self.create_instances.append(instance)
@@ -840,6 +869,9 @@ class Resource(metaclass=DeclarativeMetaclass):
         collect_failed_rows,
         **kwargs,
     ):
+        # Clear the cache at the start of each import
+        self._processed_instances_cache = {}
+        
         result = self.get_result_class()()
         result.diff_headers = self.get_diff_headers()
         result.total_rows = len(dataset)
