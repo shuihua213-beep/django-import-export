@@ -669,3 +669,78 @@ class BulkUUIDBookDeleteTest(BulkTest):
         self.assertEqual(10, UUIDBook.objects.count())
         self.resource.import_data(self.dataset)
         self.assertEqual(0, UUIDBook.objects.count())
+
+
+class BulkCreateDuplicateRowTest(TestCase):
+    def setUp(self):
+        Book.objects.create(id=1, name="ExistingBook")
+
+    def test_duplicate_rows_in_dataset_triggers_update_not_duplicate_insert(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+
+        resource = _BookResource()
+        rows = [(1, "First"), (1, "Second")]
+        dataset = tablib.Dataset(*rows, headers=["id", "name"])
+        result = resource.import_data(dataset)
+        self.assertEqual(1, result.totals["new"])
+        self.assertEqual(1, result.totals["update"])
+        self.assertEqual(1, Book.objects.count())
+        self.assertEqual("Second", Book.objects.get(id=1).name)
+
+    def test_duplicate_new_rows_with_batch_size_none(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                batch_size = None
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+
+        Book.objects.all().delete()
+        resource = _BookResource()
+        rows = [(1, "First"), (1, "Second")]
+        dataset = tablib.Dataset(*rows, headers=["id", "name"])
+        result = resource.import_data(dataset)
+        self.assertEqual(1, result.totals["new"])
+        self.assertEqual(1, result.totals["update"])
+        self.assertEqual(1, Book.objects.count())
+        self.assertEqual("Second", Book.objects.get(id=1).name)
+
+    def test_duplicate_rows_dry_run_behavior_unchanged(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+
+        Book.objects.all().delete()
+        resource = _BookResource()
+        rows = [(1, "First"), (1, "Second")]
+        dataset = tablib.Dataset(*rows, headers=["id", "name"])
+        result = resource.import_data(dataset, dry_run=True)
+        self.assertEqual(1, result.totals["new"])
+        self.assertEqual(1, result.totals["update"])
+        self.assertEqual(0, Book.objects.count())
+
+    def test_non_duplicate_rows_still_create(self):
+        class _BookResource(resources.ModelResource):
+            class Meta:
+                model = Book
+                use_bulk = True
+                fields = ("id", "name")
+                import_id_fields = ("id",)
+
+        Book.objects.all().delete()
+        resource = _BookResource()
+        rows = [(1, "Book1"), (2, "Book2")]
+        dataset = tablib.Dataset(*rows, headers=["id", "name"])
+        result = resource.import_data(dataset)
+        self.assertEqual(2, result.totals["new"])
+        self.assertEqual(0, result.totals["update"])
+        self.assertEqual(2, Book.objects.count())

@@ -182,7 +182,38 @@ class Resource(metaclass=DeclarativeMetaclass):
             instance = self.get_instance(instance_loader, row)
             if instance:
                 return instance, False
+        if self._meta.use_bulk:
+            instance = self._get_existing_create_instance(row)
+            if instance:
+                return instance, False
         return self.init_instance(row), True
+
+    def _get_existing_create_instance(self, row):
+        """
+        When use_bulk is enabled, check if an instance matching the row's
+        import_id_fields has already been added to create_instances during
+        this import. This handles the case where duplicate rows in the
+        dataset would otherwise cause duplicate inserts instead of updates.
+        """
+        import_id_fields = self.get_import_id_fields()
+        if not import_id_fields:
+            return None
+        for field_name in import_id_fields:
+            field = self.fields[field_name]
+            if field.column_name not in row:
+                return None
+        for instance in self.create_instances:
+            match = True
+            for field_name in import_id_fields:
+                field = self.fields[field_name]
+                row_value = field.clean(row)
+                instance_value = field.get_value(instance)
+                if row_value != instance_value:
+                    match = False
+                    break
+            if match:
+                return instance
+        return None
 
     def get_import_id_fields(self):
         """ """
@@ -301,7 +332,8 @@ class Resource(metaclass=DeclarativeMetaclass):
             if is_create:
                 self.create_instances.append(instance)
             else:
-                self.update_instances.append(instance)
+                if instance not in self.create_instances:
+                    self.update_instances.append(instance)
         elif not self._is_using_transactions(kwargs) and self._is_dry_run(kwargs):
             # we don't have transactions and we want to do a dry_run
             pass
