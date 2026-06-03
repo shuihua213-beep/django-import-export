@@ -1,0 +1,87 @@
+diff --git a/4.3.patch b/4.3.patch
+new file mode 100644
+index 0000000..e69de29
+diff --git a/import_export/resources.py b/import_export/resources.py
+index 9015759..db35f91 100644
+--- a/import_export/resources.py
++++ b/import_export/resources.py
+@@ -842,26 +842,39 @@ class Resource(metaclass=DeclarativeMetaclass):
+     ):
+         result = self.get_result_class()()
+         result.diff_headers = self.get_diff_headers()
+-        result.total_rows = len(dataset)
++        try:
++            result.total_rows = len(dataset)
++        except TypeError:
++            result.total_rows = 0
+         db_connection = self.get_db_connection_name()
+ 
+         try:
+             with atomic_if_using_transaction(using_transactions, using=db_connection):
+                 self.before_import(dataset, **kwargs)
+-            self._check_import_id_fields(dataset.headers)
++            if hasattr(dataset, "headers"):
++                self._check_import_id_fields(dataset.headers)
+         except Exception as e:
+             self.handle_import_error(result, e, raise_errors)
+ 
+         instance_loader = self._meta.instance_loader_class(self, dataset)
+ 
+         # Update the total in case the dataset was altered by before_import()
+-        result.total_rows = len(dataset)
++        try:
++            result.total_rows = len(dataset)
++        except TypeError:
++            pass
+ 
+-        if collect_failed_rows:
+-            result.add_dataset_headers(dataset.headers)
++        headers = getattr(dataset, "headers", None)
++        if collect_failed_rows and headers is not None:
++            result.add_dataset_headers(headers)
+ 
+         for i, data_row in enumerate(dataset, 1):
+-            row = OrderedDict(zip(dataset.headers, data_row))
++            if isinstance(data_row, dict):
++                row = data_row
++            elif headers is not None:
++                row = OrderedDict(zip(headers, data_row))
++            else:
++                row = data_row
+             with atomic_if_using_transaction(
+                 using_transactions and not self._meta.use_bulk, using=db_connection
+             ):
+diff --git a/test_stream.py b/test_stream.py
+new file mode 100644
+index 0000000..dc699bc
+--- /dev/null
++++ b/test_stream.py
+@@ -0,0 +1,28 @@
++import os
++import sys
++
++import django
++
++sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'tests')))
++os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
++django.setup()
++
++from core.models import Book
++from import_export import resources
++
++class BookResource(resources.ModelResource):
++    class Meta:
++        model = Book
++        use_bulk = True
++        batch_size = 2
++
++def stream_dataset():
++    for i in range(5):
++        yield {"id": i + 100, "name": f"Book {i}", "author_email": f"author{i}@example.com", "price": "10.00"}
++
++resource = BookResource()
++print("Starting import...")
++result = resource.import_data(stream_dataset())
++print("Total rows:", result.total_rows)
++print("New rows:", result.totals["new"])
++print("Books count:", Book.objects.filter(id__gte=100).count())
