@@ -63,6 +63,7 @@ class Field:
         self.saves_null_values = saves_null_values
         self.dehydrate_method = dehydrate_method
         self.m2m_add = m2m_add
+        self._clean_cache = None
 
     def __repr__(self):
         """
@@ -73,19 +74,16 @@ class Field:
             return f"<{path}: {self.column_name}>"
         return "<%s>" % path
 
-    def clean(self, row, **kwargs):
-        """
-        Translates the value stored in the imported datasource to an
-        appropriate Python object and returns it.
-        """
+    def _get_row_value(self, row):
         try:
-            value = row[self.column_name]
+            return row[self.column_name]
         except KeyError:
             raise KeyError(
                 "Column '%s' not found in dataset. Available "
                 "columns are: %s" % (self.column_name, list(row))
             )
 
+    def _clean_value(self, value, row, **kwargs):
         value = self.widget.clean(value, row=row, **kwargs)
 
         if value in self.empty_values and self.default != NOT_PROVIDED:
@@ -94,6 +92,31 @@ class Field:
             return self.default
 
         return value
+
+    def _get_row_snapshot(self, row):
+        if hasattr(row, "copy"):
+            return row.copy()
+        return dict(row)
+
+    def clean(self, row, **kwargs):
+        """
+        Translates the value stored in the imported datasource to an
+        appropriate Python object and returns it.
+        """
+        row_snapshot = self._get_row_snapshot(row)
+        if self._clean_cache is not None:
+            cached_row, cached_snapshot, cached_kwargs, cached_value = self._clean_cache
+            if (
+                cached_row is row
+                and cached_snapshot == row_snapshot
+                and cached_kwargs == kwargs
+            ):
+                return cached_value
+
+        value = self._get_row_value(row)
+        cleaned = self._clean_value(value, row, **kwargs)
+        self._clean_cache = (row, row_snapshot, kwargs.copy(), cleaned)
+        return cleaned
 
     def get_value(self, instance):
         """

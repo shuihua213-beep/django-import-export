@@ -27,6 +27,16 @@ class FieldTest(TestCase):
     def test_clean(self):
         self.assertEqual(self.field.clean(self.row), self.row["name"])
 
+    def test_clean_reuses_cached_conversion_for_same_row(self):
+        widget = mock.Mock()
+        widget.clean.return_value = "bar"
+        field = fields.Field(column_name="name", attribute="name", widget=widget)
+
+        self.assertEqual("bar", field.clean(self.row))
+        self.assertEqual("bar", field.clean(self.row))
+
+        widget.clean.assert_called_once_with(self.row["name"], row=self.row)
+
     def test_clean_raises_KeyError(self):
         self.field.column_name = "x"
         with self.assertRaisesRegex(
@@ -47,6 +57,48 @@ class FieldTest(TestCase):
         self.row["name"] = "foo"
         self.field.save(self.obj, self.row)
         self.assertEqual(self.obj.name, "foo")
+
+    def test_save_reuses_cached_conversion_for_same_row(self):
+        widget = mock.Mock()
+        widget.clean.return_value = "bar"
+        field = fields.Field(column_name="name", attribute="name", widget=widget)
+
+        self.assertEqual("bar", field.clean(self.row))
+        field.save(self.obj, self.row)
+
+        self.assertEqual("bar", self.obj.name)
+        widget.clean.assert_called_once_with(self.row["name"], row=self.row)
+
+    def test_save_recomputes_when_row_changes(self):
+        class TrackingWidget:
+            def __init__(self):
+                self.calls = []
+
+            def clean(self, value, row=None, **kwargs):
+                self.calls.append((value, row["suffix"]))
+                return f"{value}-{row['suffix']}"
+
+        widget = TrackingWidget()
+        field = fields.Field(column_name="name", attribute="name", widget=widget)
+        row = {"name": "foo", "suffix": "one"}
+
+        self.assertEqual("foo-one", field.clean(row))
+        row["suffix"] = "two"
+        field.save(self.obj, row)
+
+        self.assertEqual("foo-two", self.obj.name)
+        self.assertEqual([("foo", "one"), ("foo", "two")], widget.calls)
+
+    def test_save_recomputes_when_kwargs_change(self):
+        widget = mock.Mock()
+        widget.clean.side_effect = lambda value, row=None, **kwargs: kwargs["suffix"]
+        field = fields.Field(column_name="name", attribute="name", widget=widget)
+
+        self.assertEqual("one", field.clean(self.row, suffix="one"))
+        field.save(self.obj, self.row, suffix="two")
+
+        self.assertEqual("two", self.obj.name)
+        self.assertEqual(2, widget.clean.call_count)
 
     def test_save_follow(self):
         class Test:
@@ -99,7 +151,6 @@ class FieldTest(TestCase):
     def testget_dehydrate_method_default(self):
         field = fields.Field(attribute="foo", column_name="bar")
 
-        # `field_name` is the variable name defined in `Resource`
         resource_field_name = "field"
         method_name = field.get_dehydrate_method(resource_field_name)
         self.assertEqual(f"dehydrate_{resource_field_name}", method_name)
@@ -173,7 +224,6 @@ class FieldTest(TestCase):
         self.assertIsNone(self.field.get_value(self.obj))
 
     def test_import_null_django_CharField_saved_as_empty_string(self):
-        # issue 1485
         resource = BookResource()
         self.assertTrue(resource._meta.model.author_email.field.blank)
         self.assertFalse(resource._meta.model.author_email.field.null)
