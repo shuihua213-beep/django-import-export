@@ -1,7 +1,9 @@
+from unittest import mock
+
 from core.admin import BookResource
 from core.models import Book
 from django.core.management import CommandError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from import_export.command_utils import (
     get_default_format_names,
@@ -53,6 +55,23 @@ class GetFormatClassTest(TestCase):
         format_class = get_format_class(None, "test.csv")
         self.assertIsInstance(format_class, base_formats.CSV)
 
+    def test_load_by_file_name_with_custom_content_type(self):
+        class CustomCSV(base_formats.CSV):
+            content_type = "application/vnd.custom+csv"
+
+        base_formats.get_default_formats.cache_clear()
+        try:
+            with override_settings(IMPORT_EXPORT_FORMATS=[CustomCSV]):
+                base_formats.get_default_formats.cache_clear()
+                with mock.patch(
+                    "import_export.command_utils.mimetypes.guess_type",
+                    return_value=("application/vnd.custom+csv", None),
+                ):
+                    format_class = get_format_class(None, "test.customcsv")
+            self.assertIsInstance(format_class, CustomCSV)
+        finally:
+            base_formats.get_default_formats.cache_clear()
+
     def test_load_by_file_name_with_unknown_mime_type(self):
         with self.assertRaises(CommandError) as context:
             get_format_class(None, "test.unknown")
@@ -64,7 +83,8 @@ class GetFormatClassTest(TestCase):
         with self.assertRaises(CommandError) as context:
             get_format_class(None, "test.pdf")
         self.assertIn(
-            "Cannot find format for MIME type 'application/pdf'", str(context.exception)
+            "Cannot find format for MIME type 'application/pdf'",
+            str(context.exception),
         )
 
 

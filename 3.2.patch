@@ -1,0 +1,294 @@
+diff --git a/import_export/command_utils.py b/import_export/command_utils.py
+index 22f6e2d..e4ec5db 100644
+--- a/import_export/command_utils.py
++++ b/import_export/command_utils.py
+@@ -7,45 +7,36 @@ from import_export.formats.base_formats import get_default_formats
+ from import_export.resources import modelresource_factory
+ 
+ 
+-def get_resource_class(model_or_resource_class):
++def get_resource_class(model_or_resource_class_name):
+     try:
+-        # First, try to load it as a resource class
+-        resource_class = import_string(model_or_resource_class)
+-        return resource_class
+-    except ImportError:
+-        pass
+-
+-    try:
+-        if model_or_resource_class.count(".") == 1:
+-            app_label, model_name = model_or_resource_class.split(".")
+-            model = apps.get_model(app_label, model_name)
+-            if model:
+-                resource_class = modelresource_factory(model)
+-                return resource_class
+-    except LookupError:
+-        pass
+-
+-    raise CommandError(
+-        f"Cannot import '{model_or_resource_class}' as a resource class or model."
+-    )
++        model = apps.get_model(model_or_resource_class_name)
++        return modelresource_factory(model)
++    except (LookupError, ValueError):
++        try:
++            class_name = model_or_resource_class_name
++            return import_string(class_name)
++        except ImportError:
++            raise CommandError(
++                f"Cannot import '{model_or_resource_class_name}' as a resource class or model."
++            )
+ 
+ 
+ def get_mime_type_format_mapping():
+-    return {format.CONTENT_TYPE: format for format in get_default_formats()}
++    return {
++        format_class().get_content_type(): format_class
++        for format_class in get_default_formats()
++    }
+ 
+ 
+ def get_format_class(format_name, file_name, encoding=None):
+     if format_name:
+         try:
+-            # Direct import attempt
+             format_class = import_string(format_name)
+         except ImportError:
+-            # Fallback to base_formats
+             fallback_format_name = f"import_export.formats.base_formats.{format_name}"
+             try:
+                 format_class = import_string(fallback_format_name)
+             except ImportError:
+-                # fallback to uppercase format name
+                 try:
+                     format_class = import_string(
+                         f"import_export.formats.base_formats.{format_name.upper()}"
+@@ -57,24 +48,22 @@ def get_format_class(format_name, file_name, encoding=None):
+                     )
+         return format_class(encoding=encoding)
+ 
+-    else:
+-        # Determine MIME type from file name
+-        mimetype, file_encoding = mimetypes.guess_type(file_name)
++    mimetype, file_encoding = mimetypes.guess_type(file_name)
+ 
+-        if not mimetype:
+-            raise CommandError(
+-                f"Cannot determine MIME type for '{file_name}'. "
+-                " Please specify format with --format."
+-            )
++    if not mimetype:
++        raise CommandError(
++            f"Cannot determine MIME type for '{file_name}'. "
++            " Please specify format with --format."
++        )
+ 
+-        try:
+-            format_class = get_mime_type_format_mapping()[mimetype]
+-            return format_class(encoding=encoding or file_encoding)
+-        except KeyError:
+-            raise CommandError(
+-                f"Cannot find format for MIME type '{mimetype}'."
+-                " Please specify format with --format."
+-            )
++    try:
++        format_class = get_mime_type_format_mapping()[mimetype]
++        return format_class(encoding=encoding or file_encoding)
++    except KeyError:
++        raise CommandError(
++            f"Cannot find format for MIME type '{mimetype}'."
++            " Please specify format with --format."
++        )
+ 
+ 
+ def get_default_format_names():
+diff --git a/import_export/formats/base_formats.py b/import_export/formats/base_formats.py
+index efb5fc9..019ad92 100644
+--- a/import_export/formats/base_formats.py
++++ b/import_export/formats/base_formats.py
+@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
+ 
+ 
+ class Format:
++    CONTENT_TYPE = "application/octet-stream"
++
+     def get_title(self):
+         return type(self)
+ 
+@@ -50,7 +52,7 @@ class Format:
+     def get_content_type(self):
+         # For content types see
+         # https://www.iana.org/assignments/media-types/media-types.xhtml
+-        return "application/octet-stream"
++        return getattr(self, "content_type", None) or self.CONTENT_TYPE
+ 
+     @classmethod
+     def is_available(cls):
+@@ -65,7 +67,6 @@ class Format:
+ 
+ class TablibFormat(Format):
+     TABLIB_MODULE = None
+-    CONTENT_TYPE = "application/octet-stream"
+ 
+     def __init__(self, encoding=None):
+         self.encoding = encoding
+@@ -101,9 +102,6 @@ class TablibFormat(Format):
+     def get_extension(self):
+         return self.get_format().extensions[0]
+ 
+-    def get_content_type(self):
+-        return self.CONTENT_TYPE
+-
+     def can_import(self):
+         return hasattr(self.get_format(), "import_set")
+ 
+diff --git a/tests/core/tests/test_base_formats.py b/tests/core/tests/test_base_formats.py
+index b47f098..b785f09 100644
+--- a/tests/core/tests/test_base_formats.py
++++ b/tests/core/tests/test_base_formats.py
+@@ -53,6 +53,12 @@ class FormatTest(TestCase):
+     def test_get_content_type(self):
+         self.assertEqual("application/octet-stream", self.format.get_content_type())
+ 
++    def test_get_content_type_from_content_type_attribute(self):
++        class CustomFormat(base_formats.Format):
++            content_type = "application/x-custom"
++
++        self.assertEqual("application/x-custom", CustomFormat().get_content_type())
++
+     def test_is_available_default(self):
+         self.assertTrue(self.format.is_available())
+ 
+@@ -142,7 +148,7 @@ class XLSXTest(TestCase):
+         xlsx_data.seek(0)
+ 
+         dataset = self.format.create_dataset(xlsx_data.getvalue())
+-        assert len(dataset) == rows_before + empty_rows + rows_after  # With empty rows
++        assert len(dataset) == rows_before + empty_rows + rows_after
+ 
+     @override_settings(IMPORT_EXPORT_IMPORT_IGNORE_BLANK_LINES=True)
+     def test_xlsx_create_dataset__ignore_empty_rows(self):
+@@ -169,7 +175,7 @@ class XLSXTest(TestCase):
+         xlsx_data.seek(0)
+ 
+         dataset = self.format.create_dataset(xlsx_data.getvalue())
+-        assert len(dataset) == rows_before + rows_after  # Without empty rows
++        assert len(dataset) == rows_before + rows_after
+ 
+ 
+ class CSVTest(TestCase):
+@@ -197,7 +203,6 @@ class CSVTest(TestCase):
+         self.assertEqual(actual, expected)
+ 
+     def test_import_unicode(self):
+-        # importing csv UnicodeEncodeError 347
+         filename = os.path.join(
+             os.path.dirname(__file__), os.path.pardir, "exports", "books-unicode.csv"
+         )
+@@ -215,6 +220,14 @@ class CSVTest(TestCase):
+     def test_content_type(self):
+         self.assertEqual("text/csv", self.format.get_content_type())
+ 
++    def test_content_type_override(self):
++        class CustomCSV(base_formats.CSV):
++            content_type = "application/vnd.custom+csv"
++
++        self.assertEqual(
++            "application/vnd.custom+csv", CustomCSV().get_content_type()
++        )
++
+     def test_can_import(self):
+         self.assertTrue(self.format.can_import())
+ 
+@@ -236,7 +249,6 @@ class TSVTest(TestCase):
+         self.assertEqual(actual, expected)
+ 
+     def test_import_unicode(self):
+-        # importing tsv UnicodeEncodeError
+         filename = os.path.join(
+             os.path.dirname(__file__), os.path.pardir, "exports", "books-unicode.tsv"
+         )
+diff --git a/tests/core/tests/test_command_utils.py b/tests/core/tests/test_command_utils.py
+index 92e7218..6ee7233 100644
+--- a/tests/core/tests/test_command_utils.py
++++ b/tests/core/tests/test_command_utils.py
+@@ -1,7 +1,9 @@
++from unittest import mock
++
+ from core.admin import BookResource
+ from core.models import Book
+ from django.core.management import CommandError
+-from django.test import TestCase
++from django.test import TestCase, override_settings
+ 
+ from import_export.command_utils import (
+     get_default_format_names,
+@@ -53,6 +55,23 @@ class GetFormatClassTest(TestCase):
+         format_class = get_format_class(None, "test.csv")
+         self.assertIsInstance(format_class, base_formats.CSV)
+ 
++    def test_load_by_file_name_with_custom_content_type(self):
++        class CustomCSV(base_formats.CSV):
++            content_type = "application/vnd.custom+csv"
++
++        base_formats.get_default_formats.cache_clear()
++        try:
++            with override_settings(IMPORT_EXPORT_FORMATS=[CustomCSV]):
++                base_formats.get_default_formats.cache_clear()
++                with mock.patch(
++                    "import_export.command_utils.mimetypes.guess_type",
++                    return_value=("application/vnd.custom+csv", None),
++                ):
++                    format_class = get_format_class(None, "test.customcsv")
++            self.assertIsInstance(format_class, CustomCSV)
++        finally:
++            base_formats.get_default_formats.cache_clear()
++
+     def test_load_by_file_name_with_unknown_mime_type(self):
+         with self.assertRaises(CommandError) as context:
+             get_format_class(None, "test.unknown")
+@@ -64,7 +83,8 @@ class GetFormatClassTest(TestCase):
+         with self.assertRaises(CommandError) as context:
+             get_format_class(None, "test.pdf")
+         self.assertIn(
+-            "Cannot find format for MIME type 'application/pdf'", str(context.exception)
++            "Cannot find format for MIME type 'application/pdf'",
++            str(context.exception),
+         )
+ 
+ 
+diff --git a/tests/core/tests/test_mixins.py b/tests/core/tests/test_mixins.py
+index 7d3a15d..6c7a260 100644
+--- a/tests/core/tests/test_mixins.py
++++ b/tests/core/tests/test_mixins.py
+@@ -7,6 +7,7 @@ from django.http import HttpRequest
+ from django.test.testcases import TestCase
+ 
+ from import_export import admin, forms, mixins, resources
++from import_export.formats import base_formats
+ 
+ 
+ class BaseImportMixinTest(TestCase):
+@@ -202,6 +203,22 @@ class ExportMixinTest(TestCase):
+         m = self.TestExportMixin(self.TestExportForm)
+         self.assertEqual(self.TestExportForm, m.get_export_form())
+ 
++    def test_do_file_export_uses_custom_format_content_type(self):
++        class CustomCSV(base_formats.CSV):
++            content_type = "application/vnd.custom+csv"
++
++        m = admin.ExportMixin()
++        m.model = Book
++        m.get_export_data = MagicMock(return_value=b"id,name\r\n")
++
++        response = m._do_file_export(
++            CustomCSV(),
++            MagicMock(spec=HttpRequest),
++            Book.objects.none(),
++        )
++
++        self.assertEqual("application/vnd.custom+csv", response["Content-Type"])
++
+ 
+ class BaseExportImportMixinTest(TestCase):
+     class TestMixin(mixins.BaseImportExportMixin):

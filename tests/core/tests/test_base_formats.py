@@ -53,6 +53,12 @@ class FormatTest(TestCase):
     def test_get_content_type(self):
         self.assertEqual("application/octet-stream", self.format.get_content_type())
 
+    def test_get_content_type_from_content_type_attribute(self):
+        class CustomFormat(base_formats.Format):
+            content_type = "application/x-custom"
+
+        self.assertEqual("application/x-custom", CustomFormat().get_content_type())
+
     def test_is_available_default(self):
         self.assertTrue(self.format.is_available())
 
@@ -142,7 +148,7 @@ class XLSXTest(TestCase):
         xlsx_data.seek(0)
 
         dataset = self.format.create_dataset(xlsx_data.getvalue())
-        assert len(dataset) == rows_before + empty_rows + rows_after  # With empty rows
+        assert len(dataset) == rows_before + empty_rows + rows_after
 
     @override_settings(IMPORT_EXPORT_IMPORT_IGNORE_BLANK_LINES=True)
     def test_xlsx_create_dataset__ignore_empty_rows(self):
@@ -169,7 +175,7 @@ class XLSXTest(TestCase):
         xlsx_data.seek(0)
 
         dataset = self.format.create_dataset(xlsx_data.getvalue())
-        assert len(dataset) == rows_before + rows_after  # Without empty rows
+        assert len(dataset) == rows_before + rows_after
 
 
 class CSVTest(TestCase):
@@ -197,7 +203,6 @@ class CSVTest(TestCase):
         self.assertEqual(actual, expected)
 
     def test_import_unicode(self):
-        # importing csv UnicodeEncodeError 347
         filename = os.path.join(
             os.path.dirname(__file__), os.path.pardir, "exports", "books-unicode.csv"
         )
@@ -214,6 +219,14 @@ class CSVTest(TestCase):
 
     def test_content_type(self):
         self.assertEqual("text/csv", self.format.get_content_type())
+
+    def test_content_type_override(self):
+        class CustomCSV(base_formats.CSV):
+            content_type = "application/vnd.custom+csv"
+
+        self.assertEqual(
+            "application/vnd.custom+csv", CustomCSV().get_content_type()
+        )
 
     def test_can_import(self):
         self.assertTrue(self.format.can_import())
@@ -236,7 +249,6 @@ class TSVTest(TestCase):
         self.assertEqual(actual, expected)
 
     def test_import_unicode(self):
-        # importing tsv UnicodeEncodeError
         filename = os.path.join(
             os.path.dirname(__file__), os.path.pardir, "exports", "books-unicode.tsv"
         )

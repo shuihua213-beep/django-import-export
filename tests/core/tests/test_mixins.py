@@ -7,6 +7,7 @@ from django.http import HttpRequest
 from django.test.testcases import TestCase
 
 from import_export import admin, forms, mixins, resources
+from import_export.formats import base_formats
 
 
 class BaseImportMixinTest(TestCase):
@@ -201,6 +202,22 @@ class ExportMixinTest(TestCase):
     def test_get_export_form_with_custom_form(self):
         m = self.TestExportMixin(self.TestExportForm)
         self.assertEqual(self.TestExportForm, m.get_export_form())
+
+    def test_do_file_export_uses_custom_format_content_type(self):
+        class CustomCSV(base_formats.CSV):
+            content_type = "application/vnd.custom+csv"
+
+        m = admin.ExportMixin()
+        m.model = Book
+        m.get_export_data = MagicMock(return_value=b"id,name\r\n")
+
+        response = m._do_file_export(
+            CustomCSV(),
+            MagicMock(spec=HttpRequest),
+            Book.objects.none(),
+        )
+
+        self.assertEqual("application/vnd.custom+csv", response["Content-Type"])
 
 
 class BaseExportImportMixinTest(TestCase):

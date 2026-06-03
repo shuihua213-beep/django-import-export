@@ -7,45 +7,36 @@ from import_export.formats.base_formats import get_default_formats
 from import_export.resources import modelresource_factory
 
 
-def get_resource_class(model_or_resource_class):
+def get_resource_class(model_or_resource_class_name):
     try:
-        # First, try to load it as a resource class
-        resource_class = import_string(model_or_resource_class)
-        return resource_class
-    except ImportError:
-        pass
-
-    try:
-        if model_or_resource_class.count(".") == 1:
-            app_label, model_name = model_or_resource_class.split(".")
-            model = apps.get_model(app_label, model_name)
-            if model:
-                resource_class = modelresource_factory(model)
-                return resource_class
-    except LookupError:
-        pass
-
-    raise CommandError(
-        f"Cannot import '{model_or_resource_class}' as a resource class or model."
-    )
+        model = apps.get_model(model_or_resource_class_name)
+        return modelresource_factory(model)
+    except (LookupError, ValueError):
+        try:
+            class_name = model_or_resource_class_name
+            return import_string(class_name)
+        except ImportError:
+            raise CommandError(
+                f"Cannot import '{model_or_resource_class_name}' as a resource class or model."
+            )
 
 
 def get_mime_type_format_mapping():
-    return {format.CONTENT_TYPE: format for format in get_default_formats()}
+    return {
+        format_class().get_content_type(): format_class
+        for format_class in get_default_formats()
+    }
 
 
 def get_format_class(format_name, file_name, encoding=None):
     if format_name:
         try:
-            # Direct import attempt
             format_class = import_string(format_name)
         except ImportError:
-            # Fallback to base_formats
             fallback_format_name = f"import_export.formats.base_formats.{format_name}"
             try:
                 format_class = import_string(fallback_format_name)
             except ImportError:
-                # fallback to uppercase format name
                 try:
                     format_class = import_string(
                         f"import_export.formats.base_formats.{format_name.upper()}"
@@ -57,24 +48,22 @@ def get_format_class(format_name, file_name, encoding=None):
                     )
         return format_class(encoding=encoding)
 
-    else:
-        # Determine MIME type from file name
-        mimetype, file_encoding = mimetypes.guess_type(file_name)
+    mimetype, file_encoding = mimetypes.guess_type(file_name)
 
-        if not mimetype:
-            raise CommandError(
-                f"Cannot determine MIME type for '{file_name}'. "
-                " Please specify format with --format."
-            )
+    if not mimetype:
+        raise CommandError(
+            f"Cannot determine MIME type for '{file_name}'. "
+            " Please specify format with --format."
+        )
 
-        try:
-            format_class = get_mime_type_format_mapping()[mimetype]
-            return format_class(encoding=encoding or file_encoding)
-        except KeyError:
-            raise CommandError(
-                f"Cannot find format for MIME type '{mimetype}'."
-                " Please specify format with --format."
-            )
+    try:
+        format_class = get_mime_type_format_mapping()[mimetype]
+        return format_class(encoding=encoding or file_encoding)
+    except KeyError:
+        raise CommandError(
+            f"Cannot find format for MIME type '{mimetype}'."
+            " Please specify format with --format."
+        )
 
 
 def get_default_format_names():
