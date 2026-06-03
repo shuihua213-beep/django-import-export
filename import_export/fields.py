@@ -1,7 +1,6 @@
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models.fields import NOT_PROVIDED
 from django.db.models.manager import Manager
-
 from . import widgets
 from .exceptions import FieldError
 
@@ -13,28 +12,21 @@ class Field:
 
     :param attribute: A string of either an instance attribute or callable of
         the instance.
-
     :param column_name: An optional column name for the column that represents
         this field in the export.
-
     :param widget: Defines a widget that will be used to represent this
         field's data in the export, or transform the value during import.
-
     :param readonly: A Boolean which defines if this field will be ignored
         during import.
-
     :param default: This value will be returned by
         :meth:`~import_export.fields.Field.clean` if this field's widget returned
         a value defined in :attr:`~import_export.fields.empty_values`.
-
     :param saves_null_values: Controls whether null values are saved on the instance.
       This can be used if the widget returns null, but there is a default instance
       value which should not be overwritten.
-
     :param dehydrate_method: You can provide a `dehydrate_method` as a string to use
         instead of the default `dehydrate_{field_name}` syntax, or you can provide
         a callable that will be executed with the instance as its argument.
-
     :param m2m_add: changes save of this field to add the values, if they do not exist,
         to a ManyToMany field instead of setting all values.  Only useful if field is
         a ManyToMany field.
@@ -85,14 +77,11 @@ class Field:
                 "Column '%s' not found in dataset. Available "
                 "columns are: %s" % (self.column_name, list(row))
             )
-
         value = self.widget.clean(value, row=row, **kwargs)
-
         if value in self.empty_values and self.default != NOT_PROVIDED:
             if callable(self.default):
                 return self.default()
             return self.default
-
         return value
 
     def get_value(self, instance):
@@ -101,10 +90,8 @@ class Field:
         """
         if self.attribute is None:
             return None
-
         attrs = self.attribute.split("__")
         value = instance
-
         for attr in attrs:
             try:
                 if isinstance(value, dict):
@@ -117,23 +104,31 @@ class Field:
                 return None
             if value is None:
                 return None
-
         # RelatedManager and ManyRelatedManager classes are callable in
         # Django >= 1.7 but we don't want to call them
         if callable(value) and not isinstance(value, Manager):
             value = value()
         return value
 
-    def save(self, instance, row, is_m2m=False, **kwargs):
+    def save(self, instance, row=None, is_m2m=False, cleaned=None, **kwargs):
         """
         If this field is not declared readonly, the instance's attribute will
         be set to the value returned by :meth:`~import_export.fields.Field.clean`.
+        
+        If the `cleaned` parameter is provided, it will be used directly without
+        calling :meth:`~import_export.fields.Field.clean` again, improving
+        performance by avoiding redundant data conversion.
         """
         if not self.readonly:
             attrs = self.attribute.split("__")
             for attr in attrs[:-1]:
                 instance = getattr(instance, attr, None)
-            cleaned = self.clean(row, **kwargs)
+            if cleaned is None:
+                if row is None:
+                    raise ValueError(
+                        "Either 'row' or 'cleaned' must be provided to save"
+                    )
+                cleaned = self.clean(row, **kwargs)
             if cleaned is not None or self.saves_null_values:
                 if not is_m2m:
                     setattr(instance, attrs[-1], cleaned)
@@ -156,8 +151,6 @@ class Field:
         Defaults to `dehydrate_{field_name}`
         """
         DEFAULT_DEHYDRATE_METHOD_PREFIX = "dehydrate_"
-
         if not self.dehydrate_method and not field_name:
             raise FieldError("Both dehydrate_method and field_name are not supplied.")
-
         return self.dehydrate_method or DEFAULT_DEHYDRATE_METHOD_PREFIX + field_name
