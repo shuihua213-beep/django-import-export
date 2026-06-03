@@ -13,22 +13,7 @@ from tablib.formats import registry
 logger = logging.getLogger(__name__)
 
 
-class Format:
-    def get_title(self):
-        return type(self)
-
-    def create_dataset(self, in_stream):
-        """
-        Create dataset from given string.
-        """
-        raise NotImplementedError()
-
-    def export_data(self, dataset, **kwargs):
-        """
-        Returns format representation for given dataset.
-        """
-        raise NotImplementedError()
-
+class FileMetadataMixin:
     def is_binary(self):
         """
         Returns if this format is binary.
@@ -51,6 +36,25 @@ class Format:
         # For content types see
         # https://www.iana.org/assignments/media-types/media-types.xhtml
         return "application/octet-stream"
+
+
+class DataSerializer:
+    def create_dataset(self, in_stream):
+        """
+        Create dataset from given string.
+        """
+        raise NotImplementedError()
+
+    def export_data(self, dataset, **kwargs):
+        """
+        Returns format representation for given dataset.
+        """
+        raise NotImplementedError()
+
+
+class Format(FileMetadataMixin, DataSerializer):
+    def get_title(self):
+        return type(self)
 
     @classmethod
     def is_available(cls):
