@@ -63,6 +63,7 @@ class Field:
         self.saves_null_values = saves_null_values
         self.dehydrate_method = dehydrate_method
         self.m2m_add = m2m_add
+        self._clean_cache = None
 
     def __repr__(self):
         """
@@ -78,6 +79,9 @@ class Field:
         Translates the value stored in the imported datasource to an
         appropriate Python object and returns it.
         """
+        if self._clean_cache and self._clean_cache[0] is row:
+            return self._clean_cache[1]
+
         try:
             value = row[self.column_name]
         except KeyError:
@@ -90,9 +94,11 @@ class Field:
 
         if value in self.empty_values and self.default != NOT_PROVIDED:
             if callable(self.default):
-                return self.default()
-            return self.default
+                value = self.default()
+            else:
+                value = self.default
 
+        self._clean_cache = (row, value)
         return value
 
     def get_value(self, instance):
