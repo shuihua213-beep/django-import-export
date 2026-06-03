@@ -842,26 +842,39 @@ class Resource(metaclass=DeclarativeMetaclass):
     ):
         result = self.get_result_class()()
         result.diff_headers = self.get_diff_headers()
-        result.total_rows = len(dataset)
+        try:
+            result.total_rows = len(dataset)
+        except TypeError:
+            result.total_rows = 0
         db_connection = self.get_db_connection_name()
 
         try:
             with atomic_if_using_transaction(using_transactions, using=db_connection):
                 self.before_import(dataset, **kwargs)
-            self._check_import_id_fields(dataset.headers)
+            if hasattr(dataset, "headers"):
+                self._check_import_id_fields(dataset.headers)
         except Exception as e:
             self.handle_import_error(result, e, raise_errors)
 
         instance_loader = self._meta.instance_loader_class(self, dataset)
 
         # Update the total in case the dataset was altered by before_import()
-        result.total_rows = len(dataset)
+        try:
+            result.total_rows = len(dataset)
+        except TypeError:
+            pass
 
-        if collect_failed_rows:
-            result.add_dataset_headers(dataset.headers)
+        headers = getattr(dataset, "headers", None)
+        if collect_failed_rows and headers is not None:
+            result.add_dataset_headers(headers)
 
         for i, data_row in enumerate(dataset, 1):
-            row = OrderedDict(zip(dataset.headers, data_row))
+            if isinstance(data_row, dict):
+                row = data_row
+            elif headers is not None:
+                row = OrderedDict(zip(headers, data_row))
+            else:
+                row = data_row
             with atomic_if_using_transaction(
                 using_transactions and not self._meta.use_bulk, using=db_connection
             ):
