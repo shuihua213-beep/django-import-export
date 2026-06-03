@@ -1,0 +1,62 @@
+diff --git a/import_export/formats/base_formats.py b/import_export/formats/base_formats.py
+index efb5fc9..03a2545 100644
+--- a/import_export/formats/base_formats.py
++++ b/import_export/formats/base_formats.py
+@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
+ 
+ 
+ class Format:
++    CONTENT_TYPE = "application/octet-stream"
++
+     def get_title(self):
+         return type(self)
+ 
+@@ -50,7 +52,7 @@ class Format:
+     def get_content_type(self):
+         # For content types see
+         # https://www.iana.org/assignments/media-types/media-types.xhtml
+-        return "application/octet-stream"
++        return self.CONTENT_TYPE
+ 
+     @classmethod
+     def is_available(cls):
+diff --git a/tests/core/tests/test_base_formats.py b/tests/core/tests/test_base_formats.py
+index b47f098..5319f4f 100644
+--- a/tests/core/tests/test_base_formats.py
++++ b/tests/core/tests/test_base_formats.py
+@@ -345,3 +345,35 @@ class GetBinaryFormatsTest(TestCase):
+         """With only XLSX enabled, returns [XLSX]."""
+         result = base_formats.get_binary_formats()
+         self.assertEqual(result, [base_formats.XLSX])
++
++
++class CustomContentTypeTest(TestCase):
++    def test_base_format_has_content_type_class_attribute(self):
++        self.assertEqual(base_formats.Format.CONTENT_TYPE, "application/octet-stream")
++
++    def test_custom_format_with_content_type(self):
++        class CustomCSV(base_formats.CSV):
++            CONTENT_TYPE = "text/custom-csv"
++
++        fmt = CustomCSV()
++        self.assertEqual(fmt.get_content_type(), "text/custom-csv")
++
++    def test_custom_format_overriding_get_content_type(self):
++        class DynamicFormat(base_formats.Format):
++            CONTENT_TYPE = "text/plain"
++
++            def get_content_type(self):
++                return "application/dynamic"
++
++        fmt = DynamicFormat()
++        self.assertEqual(fmt.get_content_type(), "application/dynamic")
++
++    def test_content_type_class_attribute_inheritance(self):
++        self.assertEqual(base_formats.CSV.CONTENT_TYPE, "text/csv")
++        self.assertEqual(base_formats.JSON.CONTENT_TYPE, "application/json")
++        self.assertEqual(base_formats.XLSX.CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
++
++    def test_instance_content_type_override(self):
++        fmt = base_formats.CSV()
++        fmt.CONTENT_TYPE = "text/csv-override"
++        self.assertEqual(fmt.get_content_type(), "text/csv-override")

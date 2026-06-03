@@ -345,3 +345,35 @@ class GetBinaryFormatsTest(TestCase):
         """With only XLSX enabled, returns [XLSX]."""
         result = base_formats.get_binary_formats()
         self.assertEqual(result, [base_formats.XLSX])
+
+
+class CustomContentTypeTest(TestCase):
+    def test_base_format_has_content_type_class_attribute(self):
+        self.assertEqual(base_formats.Format.CONTENT_TYPE, "application/octet-stream")
+
+    def test_custom_format_with_content_type(self):
+        class CustomCSV(base_formats.CSV):
+            CONTENT_TYPE = "text/custom-csv"
+
+        fmt = CustomCSV()
+        self.assertEqual(fmt.get_content_type(), "text/custom-csv")
+
+    def test_custom_format_overriding_get_content_type(self):
+        class DynamicFormat(base_formats.Format):
+            CONTENT_TYPE = "text/plain"
+
+            def get_content_type(self):
+                return "application/dynamic"
+
+        fmt = DynamicFormat()
+        self.assertEqual(fmt.get_content_type(), "application/dynamic")
+
+    def test_content_type_class_attribute_inheritance(self):
+        self.assertEqual(base_formats.CSV.CONTENT_TYPE, "text/csv")
+        self.assertEqual(base_formats.JSON.CONTENT_TYPE, "application/json")
+        self.assertEqual(base_formats.XLSX.CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    def test_instance_content_type_override(self):
+        fmt = base_formats.CSV()
+        fmt.CONTENT_TYPE = "text/csv-override"
+        self.assertEqual(fmt.get_content_type(), "text/csv-override")
