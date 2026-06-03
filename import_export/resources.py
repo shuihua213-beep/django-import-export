@@ -5,6 +5,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from html import escape
 from warnings import warn
+from abc import ABC, abstractmethod
 
 import tablib
 from diff_match_patch import diff_match_patch
@@ -30,6 +31,83 @@ from .utils import atomic_if_using_transaction, get_related_model
 logger = logging.getLogger(__name__)
 # Set default logging handler to avoid "No handler found" warnings.
 logger.addHandler(logging.NullHandler())
+
+
+class StreamingDataset(ABC):
+    """
+    Abstract base class for streaming datasets.
+    Provides a way to process data row by row without loading the entire dataset into memory.
+    """
+    def __init__(self, headers):
+        self._headers = headers
+        self._total_rows = None
+
+    @property
+    def headers(self):
+        """Get the headers of the dataset."""
+        return self._headers
+
+    @abstractmethod
+    def __iter__(self):
+        """
+        Iterate over the dataset row by row.
+        Yields rows as lists of values.
+        """
+        pass
+
+    @property
+    def dict(self):
+        """
+        Return the dataset as a list of dictionaries (backward compatibility).
+        Note: This will load all rows into memory.
+        """
+        return [OrderedDict(zip(self.headers, row)) for row in self]
+
+    def __len__(self):
+        """Get the total number of rows in the dataset."""
+        if self._total_rows is None:
+            self._total_rows = sum(1 for _ in self)
+        return self._total_rows
+
+    def __getitem__(self, index):
+        """Get a specific row (backward compatibility). Note: This is not efficient for streaming."""
+        if isinstance(index, slice):
+            # Handle slices - though not efficient for streaming
+            rows = []
+            for i, row in enumerate(self):
+                if i in range(*index.indices(len(self))):
+                    rows.append(row)
+            return rows
+        else:
+            for i, row in enumerate(self):
+                if i == index:
+                    return row
+        raise IndexError("Index out of range")
+
+
+class TablibStreamingDataset(StreamingDataset):
+    """
+    Streaming wrapper for tablib.Dataset.
+    Maintains backward compatibility while allowing for more memory-efficient processing.
+    """
+    def __init__(self, dataset):
+        super().__init__(dataset.headers)
+        self._dataset = dataset
+        self._total_rows = len(dataset)
+
+    def __iter__(self):
+        for row in self._dataset:
+            yield row
+
+    @property
+    def dict(self):
+        return self._dataset.dict
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def __getitem__(self, index):
+        return self._dataset[index]
 
 
 def has_natural_foreign_key(model):
@@ -814,6 +892,10 @@ class Resource(metaclass=DeclarativeMetaclass):
         ):
             raise ValueError("Batch size must be a positive integer")
 
+        # Wrap tablib Dataset to support streaming interface (backward compatible)
+        if not isinstance(dataset, StreamingDataset):
+            dataset = TablibStreamingDataset(dataset)
+
         with atomic_if_using_transaction(using_transactions, using=db_connection):
             result = self.import_data_inner(
                 dataset,
@@ -881,7 +963,10 @@ class Resource(metaclass=DeclarativeMetaclass):
                 # persist a batch of rows
                 # because this is a batch, any exceptions are logged and not associated
                 # with a specific row
-                if len(self.create_instances) == self._meta.batch_size:
+                # Use a default batch size if not specified
+                batch_size = self._meta.batch_size or getattr(settings, "IMPORT_EXPORT_BATCH_SIZE", 1000)
+                
+                if len(self.create_instances) >= batch_size:
                     with atomic_if_using_transaction(
                         using_transactions, using=db_connection
                     ):
@@ -889,10 +974,10 @@ class Resource(metaclass=DeclarativeMetaclass):
                             using_transactions,
                             dry_run,
                             raise_errors,
-                            batch_size=self._meta.batch_size,
+                            batch_size=batch_size,
                             result=result,
                         )
-                if len(self.update_instances) == self._meta.batch_size:
+                if len(self.update_instances) >= batch_size:
                     with atomic_if_using_transaction(
                         using_transactions, using=db_connection
                     ):
@@ -900,10 +985,10 @@ class Resource(metaclass=DeclarativeMetaclass):
                             using_transactions,
                             dry_run,
                             raise_errors,
-                            batch_size=self._meta.batch_size,
+                            batch_size=batch_size,
                             result=result,
                         )
-                if len(self.delete_instances) == self._meta.batch_size:
+                if len(self.delete_instances) >= batch_size:
                     with atomic_if_using_transaction(
                         using_transactions, using=db_connection
                     ):

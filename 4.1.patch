@@ -1,0 +1,365 @@
+diff --git a/import_export/formats/base_formats.py b/import_export/formats/base_formats.py
+index efb5fc9..e47208b 100644
+--- a/import_export/formats/base_formats.py
++++ b/import_export/formats/base_formats.py
+@@ -3,16 +3,173 @@
+ # e.g. add openpyxl imports to the XLSXFormat class
+ # See issue 2004
+ import logging
++import csv
++import io
+ from functools import lru_cache
++from collections import OrderedDict
+ 
+ import tablib
+ from django.conf import settings
+ from django.utils.translation import gettext_lazy as _
+ from tablib.formats import registry
+ 
++from ..resources import StreamingDataset
++
+ logger = logging.getLogger(__name__)
+ 
+ 
++class CSVStreamingDataset(StreamingDataset):
++    """
++    Streaming dataset for CSV files.
++    Reads data row by row from a CSV file without loading the entire file into memory.
++    """
++    def __init__(self, in_stream, encoding='utf-8', **kwargs):
++        self.in_stream = in_stream
++        self.encoding = encoding
++        self.kwargs = kwargs
++        self._headers = None
++        self._total_rows = None
++        self._reader = None
++        self._initialize_reader()
++
++    def _initialize_reader(self):
++        if isinstance(self.in_stream, bytes):
++            self.in_stream = io.BytesIO(self.in_stream)
++        if isinstance(self.in_stream, io.BufferedIOBase):
++            text_stream = io.TextIOWrapper(self.in_stream, encoding=self.encoding)
++        elif isinstance(self.in_stream, str):
++            text_stream = io.StringIO(self.in_stream)
++        else:
++            text_stream = self.in_stream
++        
++        self._reader = csv.reader(text_stream, **self.kwargs)
++        try:
++            self._headers = next(self._reader)
++        except StopIteration:
++            self._headers = []
++
++    def __iter__(self):
++        # Reset the stream and reader
++        if hasattr(self.in_stream, 'seek'):
++            self.in_stream.seek(0)
++        self._initialize_reader()
++        
++        for row in self._reader:
++            yield row
++
++    @property
++    def dict(self):
++        # Backward compatibility - loads all rows into memory
++        rows = []
++        for row in self:
++            rows.append(OrderedDict(zip(self.headers, row)))
++        return rows
++
++    def __len__(self):
++        if self._total_rows is None:
++            self._total_rows = sum(1 for _ in self)
++        return self._total_rows
++
++    def __getitem__(self, index):
++        # Backward compatibility - not efficient for streaming
++        if isinstance(index, slice):
++            rows = []
++            for i, row in enumerate(self):
++                if i in range(*index.indices(len(self))):
++                    rows.append(row)
++            return rows
++        else:
++            for i, row in enumerate(self):
++                if i == index:
++                    return row
++        raise IndexError("Index out of range")
++
++
++class XLSXStreamingDataset(StreamingDataset):
++    """
++    Streaming dataset for XLSX files.
++    Reads data row by row from an XLSX file without loading the entire file into memory.
++    Uses openpyxl's read-only mode for efficient memory usage.
++    """
++    def __init__(self, in_stream, sheet_name=None):
++        self.in_stream = in_stream
++        self.sheet_name = sheet_name
++        self._headers = None
++        self._total_rows = None
++        self._initialize_reader()
++
++    def _initialize_reader(self):
++        from io import BytesIO
++        import openpyxl
++        
++        if isinstance(self.in_stream, bytes):
++            self.in_stream = BytesIO(self.in_stream)
++        
++        self._workbook = openpyxl.load_workbook(
++            self.in_stream, read_only=True, data_only=True
++        )
++        
++        if self.sheet_name:
++            self._sheet = self._workbook[self.sheet_name]
++        else:
++            self._sheet = self._workbook.active
++        
++        rows = iter(self._sheet.rows)
++        try:
++            self._headers = [cell.value for cell in next(rows)]
++        except StopIteration:
++            self._headers = []
++
++    def __iter__(self):
++        from django.conf import settings
++        
++        # Reset the stream and reader
++        if hasattr(self.in_stream, 'seek'):
++            self.in_stream.seek(0)
++        self._initialize_reader()
++        
++        ignore_blanks = getattr(
++            settings, "IMPORT_EXPORT_IMPORT_IGNORE_BLANK_LINES", False
++        )
++        
++        rows = iter(self._sheet.rows)
++        # Skip header row
++        next(rows, None)
++        
++        for row in rows:
++            row_values = [cell.value for cell in row]
++            if ignore_blanks and all(value is None for value in row_values):
++                continue
++            yield row_values
++
++    @property
++    def dict(self):
++        # Backward compatibility - loads all rows into memory
++        rows = []
++        for row in self:
++            rows.append(OrderedDict(zip(self.headers, row)))
++        return rows
++
++    def __len__(self):
++        if self._total_rows is None:
++            self._total_rows = sum(1 for _ in self)
++        return self._total_rows
++
++    def __getitem__(self, index):
++        # Backward compatibility - not efficient for streaming
++        if isinstance(index, slice):
++            rows = []
++            for i, row in enumerate(self):
++                if i in range(*index.indices(len(self))):
++                    rows.append(row)
++            return rows
++        else:
++            for i, row in enumerate(self):
++                if i == index:
++                    return row
++        raise IndexError("Index out of range")
++
++
+ class Format:
+     def get_title(self):
+         return type(self)
+@@ -23,6 +180,15 @@ class Format:
+         """
+         raise NotImplementedError()
+ 
++    def create_streaming_dataset(self, in_stream, **kwargs):
++        """
++        Create streaming dataset from given stream (optional).
++        Defaults to calling create_dataset for backward compatibility.
++        """
++        dataset = self.create_dataset(in_stream)
++        from ..resources import TablibStreamingDataset
++        return TablibStreamingDataset(dataset)
++
+     def export_data(self, dataset, **kwargs):
+         """
+         Returns format representation for given dataset.
+@@ -137,6 +303,12 @@ class CSV(TextFormat):
+     TABLIB_MODULE = "tablib.formats._csv"
+     CONTENT_TYPE = "text/csv"
+ 
++    def create_streaming_dataset(self, in_stream, **kwargs):
++        """
++        Create streaming dataset for CSV files.
++        """
++        return CSVStreamingDataset(in_stream, encoding=self.encoding or 'utf-8', **kwargs)
++
+ 
+ class JSON(TextFormat):
+     TABLIB_MODULE = "tablib.formats._json"
+@@ -222,6 +394,12 @@ class XLSX(TablibFormat):
+                 dataset.append(row_values)
+         return dataset
+ 
++    def create_streaming_dataset(self, in_stream, sheet_name=None, **kwargs):
++        """
++        Create streaming dataset for XLSX files.
++        """
++        return XLSXStreamingDataset(in_stream, sheet_name=sheet_name)
++
+     def export_data(self, dataset, **kwargs):
+         from openpyxl.utils.exceptions import IllegalCharacterError
+ 
+diff --git a/import_export/resources.py b/import_export/resources.py
+index 9015759..51e2412 100644
+--- a/import_export/resources.py
++++ b/import_export/resources.py
+@@ -5,6 +5,7 @@ from collections import OrderedDict
+ from copy import deepcopy
+ from html import escape
+ from warnings import warn
++from abc import ABC, abstractmethod
+ 
+ import tablib
+ from diff_match_patch import diff_match_patch
+@@ -32,6 +33,83 @@ logger = logging.getLogger(__name__)
+ logger.addHandler(logging.NullHandler())
+ 
+ 
++class StreamingDataset(ABC):
++    """
++    Abstract base class for streaming datasets.
++    Provides a way to process data row by row without loading the entire dataset into memory.
++    """
++    def __init__(self, headers):
++        self._headers = headers
++        self._total_rows = None
++
++    @property
++    def headers(self):
++        """Get the headers of the dataset."""
++        return self._headers
++
++    @abstractmethod
++    def __iter__(self):
++        """
++        Iterate over the dataset row by row.
++        Yields rows as lists of values.
++        """
++        pass
++
++    @property
++    def dict(self):
++        """
++        Return the dataset as a list of dictionaries (backward compatibility).
++        Note: This will load all rows into memory.
++        """
++        return [OrderedDict(zip(self.headers, row)) for row in self]
++
++    def __len__(self):
++        """Get the total number of rows in the dataset."""
++        if self._total_rows is None:
++            self._total_rows = sum(1 for _ in self)
++        return self._total_rows
++
++    def __getitem__(self, index):
++        """Get a specific row (backward compatibility). Note: This is not efficient for streaming."""
++        if isinstance(index, slice):
++            # Handle slices - though not efficient for streaming
++            rows = []
++            for i, row in enumerate(self):
++                if i in range(*index.indices(len(self))):
++                    rows.append(row)
++            return rows
++        else:
++            for i, row in enumerate(self):
++                if i == index:
++                    return row
++        raise IndexError("Index out of range")
++
++
++class TablibStreamingDataset(StreamingDataset):
++    """
++    Streaming wrapper for tablib.Dataset.
++    Maintains backward compatibility while allowing for more memory-efficient processing.
++    """
++    def __init__(self, dataset):
++        super().__init__(dataset.headers)
++        self._dataset = dataset
++        self._total_rows = len(dataset)
++
++    def __iter__(self):
++        for row in self._dataset:
++            yield row
++
++    @property
++    def dict(self):
++        return self._dataset.dict
++
++    def __len__(self):
++        return len(self._dataset)
++
++    def __getitem__(self, index):
++        return self._dataset[index]
++
++
+ def has_natural_foreign_key(model):
+     """
+     Determine if a model has natural foreign key functions
+@@ -814,6 +892,10 @@ class Resource(metaclass=DeclarativeMetaclass):
+         ):
+             raise ValueError("Batch size must be a positive integer")
+ 
++        # Wrap tablib Dataset to support streaming interface (backward compatible)
++        if not isinstance(dataset, StreamingDataset):
++            dataset = TablibStreamingDataset(dataset)
++
+         with atomic_if_using_transaction(using_transactions, using=db_connection):
+             result = self.import_data_inner(
+                 dataset,
+@@ -881,7 +963,10 @@ class Resource(metaclass=DeclarativeMetaclass):
+                 # persist a batch of rows
+                 # because this is a batch, any exceptions are logged and not associated
+                 # with a specific row
+-                if len(self.create_instances) == self._meta.batch_size:
++                # Use a default batch size if not specified
++                batch_size = self._meta.batch_size or getattr(settings, "IMPORT_EXPORT_BATCH_SIZE", 1000)
++                
++                if len(self.create_instances) >= batch_size:
+                     with atomic_if_using_transaction(
+                         using_transactions, using=db_connection
+                     ):
+@@ -889,10 +974,10 @@ class Resource(metaclass=DeclarativeMetaclass):
+                             using_transactions,
+                             dry_run,
+                             raise_errors,
+-                            batch_size=self._meta.batch_size,
++                            batch_size=batch_size,
+                             result=result,
+                         )
+-                if len(self.update_instances) == self._meta.batch_size:
++                if len(self.update_instances) >= batch_size:
+                     with atomic_if_using_transaction(
+                         using_transactions, using=db_connection
+                     ):
+@@ -900,10 +985,10 @@ class Resource(metaclass=DeclarativeMetaclass):
+                             using_transactions,
+                             dry_run,
+                             raise_errors,
+-                            batch_size=self._meta.batch_size,
++                            batch_size=batch_size,
+                             result=result,
+                         )
+-                if len(self.delete_instances) == self._meta.batch_size:
++                if len(self.delete_instances) >= batch_size:
+                     with atomic_if_using_transaction(
+                         using_transactions, using=db_connection
+                     ):

@@ -3,14 +3,171 @@
 # e.g. add openpyxl imports to the XLSXFormat class
 # See issue 2004
 import logging
+import csv
+import io
 from functools import lru_cache
+from collections import OrderedDict
 
 import tablib
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 from tablib.formats import registry
 
+from ..resources import StreamingDataset
+
 logger = logging.getLogger(__name__)
+
+
+class CSVStreamingDataset(StreamingDataset):
+    """
+    Streaming dataset for CSV files.
+    Reads data row by row from a CSV file without loading the entire file into memory.
+    """
+    def __init__(self, in_stream, encoding='utf-8', **kwargs):
+        self.in_stream = in_stream
+        self.encoding = encoding
+        self.kwargs = kwargs
+        self._headers = None
+        self._total_rows = None
+        self._reader = None
+        self._initialize_reader()
+
+    def _initialize_reader(self):
+        if isinstance(self.in_stream, bytes):
+            self.in_stream = io.BytesIO(self.in_stream)
+        if isinstance(self.in_stream, io.BufferedIOBase):
+            text_stream = io.TextIOWrapper(self.in_stream, encoding=self.encoding)
+        elif isinstance(self.in_stream, str):
+            text_stream = io.StringIO(self.in_stream)
+        else:
+            text_stream = self.in_stream
+        
+        self._reader = csv.reader(text_stream, **self.kwargs)
+        try:
+            self._headers = next(self._reader)
+        except StopIteration:
+            self._headers = []
+
+    def __iter__(self):
+        # Reset the stream and reader
+        if hasattr(self.in_stream, 'seek'):
+            self.in_stream.seek(0)
+        self._initialize_reader()
+        
+        for row in self._reader:
+            yield row
+
+    @property
+    def dict(self):
+        # Backward compatibility - loads all rows into memory
+        rows = []
+        for row in self:
+            rows.append(OrderedDict(zip(self.headers, row)))
+        return rows
+
+    def __len__(self):
+        if self._total_rows is None:
+            self._total_rows = sum(1 for _ in self)
+        return self._total_rows
+
+    def __getitem__(self, index):
+        # Backward compatibility - not efficient for streaming
+        if isinstance(index, slice):
+            rows = []
+            for i, row in enumerate(self):
+                if i in range(*index.indices(len(self))):
+                    rows.append(row)
+            return rows
+        else:
+            for i, row in enumerate(self):
+                if i == index:
+                    return row
+        raise IndexError("Index out of range")
+
+
+class XLSXStreamingDataset(StreamingDataset):
+    """
+    Streaming dataset for XLSX files.
+    Reads data row by row from an XLSX file without loading the entire file into memory.
+    Uses openpyxl's read-only mode for efficient memory usage.
+    """
+    def __init__(self, in_stream, sheet_name=None):
+        self.in_stream = in_stream
+        self.sheet_name = sheet_name
+        self._headers = None
+        self._total_rows = None
+        self._initialize_reader()
+
+    def _initialize_reader(self):
+        from io import BytesIO
+        import openpyxl
+        
+        if isinstance(self.in_stream, bytes):
+            self.in_stream = BytesIO(self.in_stream)
+        
+        self._workbook = openpyxl.load_workbook(
+            self.in_stream, read_only=True, data_only=True
+        )
+        
+        if self.sheet_name:
+            self._sheet = self._workbook[self.sheet_name]
+        else:
+            self._sheet = self._workbook.active
+        
+        rows = iter(self._sheet.rows)
+        try:
+            self._headers = [cell.value for cell in next(rows)]
+        except StopIteration:
+            self._headers = []
+
+    def __iter__(self):
+        from django.conf import settings
+        
+        # Reset the stream and reader
+        if hasattr(self.in_stream, 'seek'):
+            self.in_stream.seek(0)
+        self._initialize_reader()
+        
+        ignore_blanks = getattr(
+            settings, "IMPORT_EXPORT_IMPORT_IGNORE_BLANK_LINES", False
+        )
+        
+        rows = iter(self._sheet.rows)
+        # Skip header row
+        next(rows, None)
+        
+        for row in rows:
+            row_values = [cell.value for cell in row]
+            if ignore_blanks and all(value is None for value in row_values):
+                continue
+            yield row_values
+
+    @property
+    def dict(self):
+        # Backward compatibility - loads all rows into memory
+        rows = []
+        for row in self:
+            rows.append(OrderedDict(zip(self.headers, row)))
+        return rows
+
+    def __len__(self):
+        if self._total_rows is None:
+            self._total_rows = sum(1 for _ in self)
+        return self._total_rows
+
+    def __getitem__(self, index):
+        # Backward compatibility - not efficient for streaming
+        if isinstance(index, slice):
+            rows = []
+            for i, row in enumerate(self):
+                if i in range(*index.indices(len(self))):
+                    rows.append(row)
+            return rows
+        else:
+            for i, row in enumerate(self):
+                if i == index:
+                    return row
+        raise IndexError("Index out of range")
 
 
 class Format:
@@ -22,6 +179,15 @@ class Format:
         Create dataset from given string.
         """
         raise NotImplementedError()
+
+    def create_streaming_dataset(self, in_stream, **kwargs):
+        """
+        Create streaming dataset from given stream (optional).
+        Defaults to calling create_dataset for backward compatibility.
+        """
+        dataset = self.create_dataset(in_stream)
+        from ..resources import TablibStreamingDataset
+        return TablibStreamingDataset(dataset)
 
     def export_data(self, dataset, **kwargs):
         """
@@ -137,6 +303,12 @@ class CSV(TextFormat):
     TABLIB_MODULE = "tablib.formats._csv"
     CONTENT_TYPE = "text/csv"
 
+    def create_streaming_dataset(self, in_stream, **kwargs):
+        """
+        Create streaming dataset for CSV files.
+        """
+        return CSVStreamingDataset(in_stream, encoding=self.encoding or 'utf-8', **kwargs)
+
 
 class JSON(TextFormat):
     TABLIB_MODULE = "tablib.formats._json"
@@ -221,6 +393,12 @@ class XLSX(TablibFormat):
             else:
                 dataset.append(row_values)
         return dataset
+
+    def create_streaming_dataset(self, in_stream, sheet_name=None, **kwargs):
+        """
+        Create streaming dataset for XLSX files.
+        """
+        return XLSXStreamingDataset(in_stream, sheet_name=sheet_name)
 
     def export_data(self, dataset, **kwargs):
         from openpyxl.utils.exceptions import IllegalCharacterError
