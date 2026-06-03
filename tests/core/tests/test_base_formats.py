@@ -62,6 +62,30 @@ class FormatTest(TestCase):
     def test_can_export_default(self):
         self.assertFalse(self.format.can_export())
 
+    def test_file_attributes_are_delegated(self):
+        class CustomFileFormat(base_formats.FileFormat):
+            def is_binary(self):
+                return False
+
+            def get_read_mode(self):
+                return "r"
+
+            def get_extension(self, format_):
+                return "custom"
+
+            def get_content_type(self):
+                return "text/custom"
+
+        class CustomFormat(base_formats.Format):
+            def create_file_format(self):
+                return CustomFileFormat()
+
+        format_ = CustomFormat()
+        self.assertFalse(format_.is_binary())
+        self.assertEqual("r", format_.get_read_mode())
+        self.assertEqual("custom", format_.get_extension())
+        self.assertEqual("text/custom", format_.get_content_type())
+
 
 class TablibFormatTest(TestCase):
     def setUp(self):

@@ -13,7 +13,51 @@ from tablib.formats import registry
 logger = logging.getLogger(__name__)
 
 
+class FileFormat:
+    def is_binary(self):
+        return True
+
+    def get_read_mode(self):
+        return "rb"
+
+    def get_extension(self, format_):
+        return ""
+
+    def get_content_type(self):
+        return "application/octet-stream"
+
+
+class TextFileFormat(FileFormat):
+    def get_read_mode(self):
+        return "r"
+
+    def is_binary(self):
+        return False
+
+
+class TablibFileFormat(FileFormat):
+    def __init__(self, content_type="application/octet-stream"):
+        self.content_type = content_type
+
+    def get_extension(self, format_):
+        return format_.get_format().extensions[0]
+
+    def get_content_type(self):
+        return self.content_type
+
+
+class TextTablibFileFormat(TablibFileFormat, TextFileFormat):
+    pass
+
+
 class Format:
+    def __init__(self, encoding=None):
+        self.encoding = encoding
+        self.file_format = self.create_file_format()
+
+    def create_file_format(self):
+        return FileFormat()
+
     def get_title(self):
         return type(self)
 
@@ -33,24 +77,24 @@ class Format:
         """
         Returns if this format is binary.
         """
-        return True
+        return self.file_format.is_binary()
 
     def get_read_mode(self):
         """
         Returns mode for opening files.
         """
-        return "rb"
+        return self.file_format.get_read_mode()
 
     def get_extension(self):
         """
         Returns extension for this format files.
         """
-        return ""
+        return self.file_format.get_extension(self)
 
     def get_content_type(self):
         # For content types see
         # https://www.iana.org/assignments/media-types/media-types.xhtml
-        return "application/octet-stream"
+        return self.file_format.get_content_type()
 
     @classmethod
     def is_available(cls):
@@ -67,8 +111,8 @@ class TablibFormat(Format):
     TABLIB_MODULE = None
     CONTENT_TYPE = "application/octet-stream"
 
-    def __init__(self, encoding=None):
-        self.encoding = encoding
+    def create_file_format(self):
+        return TablibFileFormat(content_type=self.CONTENT_TYPE)
 
     def get_format(self):
         """
@@ -98,12 +142,6 @@ class TablibFormat(Format):
             self._escape_formulae(dataset)
         return dataset.export(self.get_title(), **kwargs)
 
-    def get_extension(self):
-        return self.get_format().extensions[0]
-
-    def get_content_type(self):
-        return self.CONTENT_TYPE
-
     def can_import(self):
         return hasattr(self.get_format(), "import_set")
 
@@ -121,16 +159,13 @@ class TablibFormat(Format):
 
 
 class TextFormat(TablibFormat):
+    def create_file_format(self):
+        return TextTablibFileFormat(content_type=self.CONTENT_TYPE)
+
     def create_dataset(self, in_stream, **kwargs):
         if isinstance(in_stream, bytes) and self.encoding:
             in_stream = in_stream.decode(self.encoding)
         return super().create_dataset(in_stream, **kwargs)
-
-    def get_read_mode(self):
-        return "r"
-
-    def is_binary(self):
-        return False
 
 
 class CSV(TextFormat):
