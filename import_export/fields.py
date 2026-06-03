@@ -63,6 +63,8 @@ class Field:
         self.saves_null_values = saves_null_values
         self.dehydrate_method = dehydrate_method
         self.m2m_add = m2m_add
+        self._clean_cache = None
+        self._cached_row = None
 
     def __repr__(self):
         """
@@ -78,6 +80,10 @@ class Field:
         Translates the value stored in the imported datasource to an
         appropriate Python object and returns it.
         """
+        # Use cached value if the same row is being processed
+        if self._clean_cache is not None and self._cached_row is row:
+            return self._clean_cache
+
         try:
             value = row[self.column_name]
         except KeyError:
@@ -93,6 +99,9 @@ class Field:
                 return self.default()
             return self.default
 
+        # Cache the result
+        self._clean_cache = value
+        self._cached_row = row
         return value
 
     def get_value(self, instance):
@@ -141,6 +150,14 @@ class Field:
                     getattr(instance, attrs[-1]).add(*cleaned)
                 else:
                     getattr(instance, attrs[-1]).set(cleaned)
+
+    def clear_cached_clean(self):
+        """
+        Clears the cached cleaned value. Should be called between processing
+        different rows to ensure stale data is not used.
+        """
+        self._clean_cache = None
+        self._cached_row = None
 
     def export(self, instance, **kwargs):
         """

@@ -685,6 +685,9 @@ class Resource(metaclass=DeclarativeMetaclass):
         if self._meta.store_row_values:
             row_result.row_values = row
         original = None
+        # Clear field clean caches before processing a new row
+        for field in self.get_import_fields():
+            field.clear_cached_clean()
         try:
             self.before_import_row(row, **kwargs)
             instance, new = self.get_or_init_instance(instance_loader, row)
