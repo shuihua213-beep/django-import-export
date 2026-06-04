@@ -597,6 +597,9 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
     #: like to disable selectable fields feature.
     export_form_class = SelectableFieldsExportForm
 
+    def get_export_formats(self):
+        return [fmt for fmt in (f() for f in self.export_formats) if fmt.can_export()]
+
     def get_urls(self):
         urls = super().get_urls()
         my_urls = [
@@ -733,7 +736,7 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
         formats = self.get_export_formats()
         queryset = self.get_export_queryset(request)
         if self.is_skip_export_form_enabled():
-            return self._do_file_export(formats[0](), request, queryset)
+            return self._do_file_export(formats[0], request, queryset)
 
         form = form_type(
             formats,
@@ -749,7 +752,7 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
                 choices=[(pk, pk) for pk in queryset.values_list("pk", flat=True)],
             )
         if form.is_valid():
-            file_format = formats[int(form.cleaned_data["format"])]()
+            file_format = formats[int(form.cleaned_data["format"])]
 
             if "export_items" in form.changed_data:
                 # this request has arisen from an Admin UI action
@@ -872,7 +875,7 @@ class ExportActionMixin(ExportMixin):
         """
         formats = self.get_export_formats()
         if self.is_skip_export_form_from_action_enabled():
-            file_format = formats[0]()
+            file_format = formats[0]
             return self._do_file_export(file_format, request, queryset)
 
         form_type = self.get_export_form_class()

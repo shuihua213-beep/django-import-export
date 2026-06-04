@@ -63,10 +63,14 @@ class ImportExportFormBase(FieldNamePrefixMixin, forms.Form):
         if not formats:
             raise ValueError("invalid formats list")
 
-        choices = [(str(i), f().get_title()) for i, f in enumerate(formats)]
+        is_class = isinstance(formats[0], type)
+        if is_class:
+            choices = [(str(i), f().get_title()) for i, f in enumerate(formats)]
+        else:
+            choices = [(str(i), f.get_title()) for i, f in enumerate(formats)]
         if len(formats) == 1:
             field = self.fields["format"]
-            field.value = formats[0]().get_title()
+            field.value = formats[0]().get_title() if is_class else formats[0].get_title()
             field.initial = 0
             field.widget.attrs["readonly"] = True
         if len(formats) > 1:
