@@ -1,0 +1,107 @@
+diff --git a/import_export/admin.py b/import_export/admin.py
+index 4fdb6ed..1d4a920 100644
+--- a/import_export/admin.py
++++ b/import_export/admin.py
+@@ -157,9 +157,9 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
+         confirm_form = self.create_confirm_form(request)
+         if confirm_form.is_valid():
+             import_formats = self.get_import_formats()
+-            input_format = import_formats[int(confirm_form.cleaned_data["format"])](
+-                encoding=self.from_encoding
+-            )
++            input_format = import_formats[int(confirm_form.cleaned_data["format"])]
++            if not input_format.is_binary():
++                input_format.encoding = self.from_encoding
+             encoding = None if input_format.is_binary() else self.from_encoding
+             tmp_storage_cls = self.get_tmp_storage_class()
+             tmp_storage = tmp_storage_cls(
+@@ -423,7 +423,7 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
+         import_form = self.create_import_form(request)
+         resources = []
+         if request.POST and import_form.is_valid():
+-            input_format = import_formats[int(import_form.cleaned_data["format"])]()
++            input_format = import_formats[int(import_form.cleaned_data["format"])]
+             if not input_format.is_binary():
+                 input_format.encoding = self.from_encoding
+             import_file = import_form.cleaned_data["import_file"]
+@@ -733,7 +733,7 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
+         formats = self.get_export_formats()
+         queryset = self.get_export_queryset(request)
+         if self.is_skip_export_form_enabled():
+-            return self._do_file_export(formats[0](), request, queryset)
++            return self._do_file_export(formats[0], request, queryset)
+ 
+         form = form_type(
+             formats,
+@@ -749,7 +749,7 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
+                 choices=[(pk, pk) for pk in queryset.values_list("pk", flat=True)],
+             )
+         if form.is_valid():
+-            file_format = formats[int(form.cleaned_data["format"])]()
++            file_format = formats[int(form.cleaned_data["format"])]
+ 
+             if "export_items" in form.changed_data:
+                 # this request has arisen from an Admin UI action
+@@ -872,7 +872,7 @@ class ExportActionMixin(ExportMixin):
+         """
+         formats = self.get_export_formats()
+         if self.is_skip_export_form_from_action_enabled():
+-            file_format = formats[0]()
++            file_format = formats[0]
+             return self._do_file_export(file_format, request, queryset)
+ 
+         form_type = self.get_export_form_class()
+diff --git a/import_export/forms.py b/import_export/forms.py
+index 6e68e4f..8ce9bb4 100644
+--- a/import_export/forms.py
++++ b/import_export/forms.py
+@@ -63,13 +63,23 @@ class ImportExportFormBase(FieldNamePrefixMixin, forms.Form):
+         if not formats:
+             raise ValueError("invalid formats list")
+ 
+-        choices = [(str(i), f().get_title()) for i, f in enumerate(formats)]
+-        if len(formats) == 1:
++        # 支持类列表和实例列表两种格式
++        format_instances = []
++        for f in formats:
++            if isinstance(f, type):
++                # 如果是类，实例化
++                format_instances.append(f())
++            else:
++                # 如果已经是实例，直接使用
++                format_instances.append(f)
++
++        choices = [(str(i), f.get_title()) for i, f in enumerate(format_instances)]
++        if len(format_instances) == 1:
+             field = self.fields["format"]
+-            field.value = formats[0]().get_title()
++            field.value = format_instances[0].get_title()
+             field.initial = 0
+             field.widget.attrs["readonly"] = True
+-        if len(formats) > 1:
++        if len(format_instances) > 1:
+             choices.insert(0, ("", "---"))
+ 
+         self.fields["format"].choices = choices
+diff --git a/import_export/mixins.py b/import_export/mixins.py
+index 72f58bb..d5ac7ea 100644
+--- a/import_export/mixins.py
++++ b/import_export/mixins.py
+@@ -95,7 +95,7 @@ class BaseImportMixin(BaseImportExportMixin):
+         """
+         Returns available import formats.
+         """
+-        return [f for f in self.import_formats if f().can_import()]
++        return [f() for f in self.import_formats if f().can_import()]
+ 
+     def get_import_resource_kwargs(self, request, **kwargs):
+         """
+@@ -140,7 +140,7 @@ class BaseExportMixin(BaseImportExportMixin):
+         """
+         Returns available export formats.
+         """
+-        return [f for f in self.export_formats if f().can_export()]
++        return [f() for f in self.export_formats if f().can_export()]
+ 
+     def get_export_resource_classes(self, request):
+         """
