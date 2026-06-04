@@ -140,7 +140,7 @@ class BaseExportMixin(BaseImportExportMixin):
         """
         Returns available export formats.
         """
-        return [f for f in self.export_formats if f().can_export()]
+        return [f for f in [fmt() for fmt in self.export_formats] if f.can_export()]
 
     def get_export_resource_classes(self, request):
         """
