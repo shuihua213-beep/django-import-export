@@ -157,9 +157,8 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
         confirm_form = self.create_confirm_form(request)
         if confirm_form.is_valid():
             import_formats = self.get_import_formats()
-            input_format = import_formats[int(confirm_form.cleaned_data["format"])](
-                encoding=self.from_encoding
-            )
+            input_format = import_formats[int(confirm_form.cleaned_data["format"])]
+            input_format.encoding = self.from_encoding
             encoding = None if input_format.is_binary() else self.from_encoding
             tmp_storage_cls = self.get_tmp_storage_class()
             tmp_storage = tmp_storage_cls(
@@ -423,7 +422,7 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
         import_form = self.create_import_form(request)
         resources = []
         if request.POST and import_form.is_valid():
-            input_format = import_formats[int(import_form.cleaned_data["format"])]()
+            input_format = import_formats[int(import_form.cleaned_data["format"])]
             if not input_format.is_binary():
                 input_format.encoding = self.from_encoding
             import_file = import_form.cleaned_data["import_file"]
@@ -733,7 +732,7 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
         formats = self.get_export_formats()
         queryset = self.get_export_queryset(request)
         if self.is_skip_export_form_enabled():
-            return self._do_file_export(formats[0](), request, queryset)
+            return self._do_file_export(formats[0], request, queryset)
 
         form = form_type(
             formats,
@@ -749,7 +748,7 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
                 choices=[(pk, pk) for pk in queryset.values_list("pk", flat=True)],
             )
         if form.is_valid():
-            file_format = formats[int(form.cleaned_data["format"])]()
+            file_format = formats[int(form.cleaned_data["format"])]
 
             if "export_items" in form.changed_data:
                 # this request has arisen from an Admin UI action
@@ -872,7 +871,7 @@ class ExportActionMixin(ExportMixin):
         """
         formats = self.get_export_formats()
         if self.is_skip_export_form_from_action_enabled():
-            file_format = formats[0]()
+            file_format = formats[0]
             return self._do_file_export(file_format, request, queryset)
 
         form_type = self.get_export_form_class()

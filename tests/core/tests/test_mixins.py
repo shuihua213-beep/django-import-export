@@ -36,7 +36,7 @@ class BaseImportMixinTest(TestCase):
 
         formats = m.get_import_formats()
         self.assertEqual(1, len(formats))
-        self.assertEqual("CanImportFormat", formats[0].__name__)
+        self.assertEqual("CanImportFormat", formats[0].__class__.__name__)
 
 
 class FooResource(resources.Resource):
@@ -179,7 +179,7 @@ class BaseExportMixinTest(TestCase):
 
         formats = m.get_export_formats()
         self.assertEqual(1, len(formats))
-        self.assertEqual("CanExportFormat", formats[0].__name__)
+        self.assertEqual("CanExportFormat", formats[0].__class__.__name__)
 
 
 class ExportMixinTest(TestCase):

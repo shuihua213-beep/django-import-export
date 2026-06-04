@@ -95,7 +95,7 @@ class BaseImportMixin(BaseImportExportMixin):
         """
         Returns available import formats.
         """
-        return [f for f in self.import_formats if f().can_import()]
+        return [f for f in (fmt() for fmt in self.import_formats) if f.can_import()]
 
     def get_import_resource_kwargs(self, request, **kwargs):
         """
@@ -140,7 +140,7 @@ class BaseExportMixin(BaseImportExportMixin):
         """
         Returns available export formats.
         """
-        return [f for f in self.export_formats if f().can_export()]
+        return [f for f in (fmt() for fmt in self.export_formats) if f.can_export()]
 
     def get_export_resource_classes(self, request):
         """
