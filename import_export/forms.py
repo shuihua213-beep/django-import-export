@@ -44,8 +44,10 @@ class ImportExportFormBase(FieldNamePrefixMixin, forms.Form):
 
     def __init__(self, formats, resources, **kwargs):
         super().__init__(**kwargs)
-        self._init_resources(resources)
-        self._init_formats(formats)
+        self.formats = list(formats)
+        self.resources = list(resources)
+        self._init_resources(self.resources)
+        self._init_formats(self.formats)
 
     def _init_resources(self, resources):
         if not resources:
@@ -63,16 +65,31 @@ class ImportExportFormBase(FieldNamePrefixMixin, forms.Form):
         if not formats:
             raise ValueError("invalid formats list")
 
-        choices = [(str(i), f().get_title()) for i, f in enumerate(formats)]
-        if len(formats) == 1:
+        self.formats = [
+            file_format if not isinstance(file_format, type) else file_format()
+            for file_format in formats
+        ]
+        choices = [
+            (str(i), file_format.get_title())
+            for i, file_format in enumerate(self.formats)
+        ]
+        if len(self.formats) == 1:
             field = self.fields["format"]
-            field.value = formats[0]().get_title()
+            field.value = self.formats[0].get_title()
             field.initial = 0
             field.widget.attrs["readonly"] = True
-        if len(formats) > 1:
+        if len(self.formats) > 1:
             choices.insert(0, ("", "---"))
 
         self.fields["format"].choices = choices
+
+    def get_selected_format(self):
+        if not getattr(self, "cleaned_data", None):
+            raise forms.ValidationError(
+                _("Form is not validated, call `is_valid` first")
+            )
+
+        return self.formats[int(self.cleaned_data["format"])]
 
 
 class ImportForm(ImportExportFormBase):
